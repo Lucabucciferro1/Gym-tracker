@@ -58,17 +58,20 @@ describe('admin authorization', () => {
     const member = await createUser(admin, { username: 'Member', password: 'Member password!' });
     const memberAgent = await login('Member', 'Member password!');
 
-    const denials = await Promise.all([
-      memberAgent.get('/api/admin/overview'),
-      memberAgent.get('/api/admin/users'),
-      memberAgent.get('/api/admin/audit'),
-      memberAgent.post('/api/admin/users').send({ username: 'Injected', role: 'user' }),
-      memberAgent.patch(`/api/admin/users/${member.id}/status`).send({ isActive: false }),
-      memberAgent.post(`/api/admin/users/${adminUser.id}/reset-invite`),
-      memberAgent.delete(`/api/admin/users/${adminUser.id}`),
-    ]);
+    const denialRequests = [
+      () => memberAgent.get('/api/admin/overview'),
+      () => memberAgent.get('/api/admin/users'),
+      () => memberAgent.get('/api/admin/audit'),
+      () => memberAgent.post('/api/admin/users').send({ username: 'Injected', role: 'user' }),
+      () => memberAgent.patch(`/api/admin/users/${member.id}/status`).send({ isActive: false }),
+      () => memberAgent.post(`/api/admin/users/${adminUser.id}/reset-invite`),
+      () => memberAgent.delete(`/api/admin/users/${adminUser.id}`),
+    ];
 
-    for (const denial of denials) {
+    // A Supertest agent owns one cookie jar and ephemeral server. Running these
+    // requests concurrently can reset a connection during teardown on Linux.
+    for (const sendDenialRequest of denialRequests) {
+      const denial = await sendDenialRequest();
       expect(denial.status).toBe(403);
       expect(denial.body).toMatchObject({ error: { code: 'ADMIN_REQUIRED' } });
     }
