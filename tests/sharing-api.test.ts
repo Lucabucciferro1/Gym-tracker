@@ -1,6 +1,3 @@
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import request from 'supertest';
 
@@ -8,18 +5,15 @@ import { createApp } from '../server/app.js';
 import { openDatabase, type Database } from '../server/db.js';
 
 let database: Database;
-let temporaryDirectory: string;
-let app: ReturnType<typeof createApp>;
+let app: Awaited<ReturnType<typeof createApp>>;
 
-beforeEach(() => {
-  temporaryDirectory = mkdtempSync(join(tmpdir(), 'forge-sharing-test-'));
-  database = openDatabase(join(temporaryDirectory, 'forge.db'));
-  app = createApp({ database, cookieSecure: false, serveStatic: false });
+beforeEach(async () => {
+  database = await openDatabase(':memory:');
+  app = await createApp({ database, cookieSecure: false, serveStatic: false });
 });
 
-afterEach(() => {
-  database.close();
-  rmSync(temporaryDirectory, { recursive: true, force: true });
+afterEach(async () => {
+  await database.close();
 });
 
 async function setupAdmin() {
@@ -254,8 +248,8 @@ describe('sharing grants', () => {
       .post('/api/sharing')
       .send({ viewerUserId: viewer.user.id, shareMeasurements: true })
       .expect(201);
-    expect(database.prepare('SELECT COUNT(*) AS count FROM sharing_permissions').get()).toEqual({ count: 1 });
+    expect(await database.prepare('SELECT COUNT(*) AS count FROM sharing_permissions').get()).toEqual({ count: 1 });
     await owner.agent.delete(`/api/admin/users/${viewer.user.id}`).expect(200);
-    expect(database.prepare('SELECT COUNT(*) AS count FROM sharing_permissions').get()).toEqual({ count: 0 });
+    expect(await database.prepare('SELECT COUNT(*) AS count FROM sharing_permissions').get()).toEqual({ count: 0 });
   });
 });

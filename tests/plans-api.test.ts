@@ -1,6 +1,3 @@
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import request from 'supertest';
 
@@ -8,18 +5,15 @@ import { createApp } from '../server/app.js';
 import { openDatabase, type Database } from '../server/db.js';
 
 let database: Database;
-let temporaryDirectory: string;
-let app: ReturnType<typeof createApp>;
+let app: Awaited<ReturnType<typeof createApp>>;
 
-beforeEach(() => {
-  temporaryDirectory = mkdtempSync(join(tmpdir(), 'forge-plans-test-'));
-  database = openDatabase(join(temporaryDirectory, 'forge.db'));
-  app = createApp({ database, cookieSecure: false, serveStatic: false });
+beforeEach(async () => {
+  database = await openDatabase(':memory:');
+  app = await createApp({ database, cookieSecure: false, serveStatic: false });
 });
 
-afterEach(() => {
-  database.close();
-  rmSync(temporaryDirectory, { recursive: true, force: true });
+afterEach(async () => {
+  await database.close();
 });
 
 async function setupAdmin() {
@@ -101,7 +95,7 @@ describe('weekly workout plan', () => {
       })
       .expect(200);
     expect(rest.body.data.day).toMatchObject({ name: 'Recovery', isRest: true, exercises: [] });
-    expect(database.prepare('SELECT COUNT(*) AS count FROM workout_exercises').get()).toEqual({ count: 0 });
+    expect(await database.prepare('SELECT COUNT(*) AS count FROM workout_exercises').get()).toEqual({ count: 0 });
   });
 });
 
@@ -192,12 +186,12 @@ describe('weekly meal plan', () => {
     await admin.delete(`/api/meal-plan/meals/${meal.body.data.meal.id}`).expect(404);
     await admin.delete(`/api/admin/users/${member.user.id}`).expect(200);
 
-    expect(database.prepare('SELECT COUNT(*) AS count FROM workout_days WHERE user_id = ?').get(member.user.id))
+    expect(await database.prepare('SELECT COUNT(*) AS count FROM workout_days WHERE user_id = ?').get(member.user.id))
       .toEqual({ count: 0 });
-    expect(database.prepare('SELECT COUNT(*) AS count FROM workout_exercises').get()).toEqual({ count: 0 });
-    expect(database.prepare('SELECT COUNT(*) AS count FROM meal_plan_settings WHERE user_id = ?').get(member.user.id))
+    expect(await database.prepare('SELECT COUNT(*) AS count FROM workout_exercises').get()).toEqual({ count: 0 });
+    expect(await database.prepare('SELECT COUNT(*) AS count FROM meal_plan_settings WHERE user_id = ?').get(member.user.id))
       .toEqual({ count: 0 });
-    expect(database.prepare('SELECT COUNT(*) AS count FROM meals WHERE user_id = ?').get(member.user.id))
+    expect(await database.prepare('SELECT COUNT(*) AS count FROM meals WHERE user_id = ?').get(member.user.id))
       .toEqual({ count: 0 });
   });
 });

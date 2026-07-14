@@ -1,6 +1,5 @@
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
-import type { DatabaseSync } from 'node:sqlite';
 import cookieParser from 'cookie-parser';
 import express, { type Express, type NextFunction, type Request, type Response } from 'express';
 import rateLimit from 'express-rate-limit';
@@ -58,8 +57,10 @@ interface AuthState {
 }
 
 export interface CreateAppOptions {
-  database?: DatabaseSync;
+  database?: Database;
   databasePath?: string;
+  databaseUrl?: string;
+  databaseAuthToken?: string;
   sessionDays?: number;
   cookieSecure?: boolean;
   trustProxy?: boolean | number | string;
@@ -233,26 +234,27 @@ function requestIp(request: Request): string | null {
   return request.ip || request.socket.remoteAddress || null;
 }
 
-function createSession(
+async function createSession(
   database: Database,
   userId: number,
   sessionDays: number,
   request: Request,
-): { rawToken: string; tokenHash: string; expiresAt: Date } {
+): Promise<{ rawToken: string; tokenHash: string; expiresAt: Date }> {
   const { rawToken, tokenHash } = createSessionToken();
   const createdAt = new Date();
   const expiresAt = new Date(createdAt.getTime() + sessionDays * 24 * 60 * 60 * 1000);
-  database.prepare(`
+  const result = await database.prepare(`
     INSERT INTO sessions (token_hash, user_id, created_at, expires_at, ip_address, user_agent)
-    VALUES (?, ?, ?, ?, ?, ?)
+    SELECT ?, id, ?, ?, ?, ? FROM users WHERE id = ? AND is_active = 1
   `).run(
     tokenHash,
-    userId,
     createdAt.toISOString(),
     expiresAt.toISOString(),
     requestIp(request),
     request.get('user-agent')?.slice(0, 500) ?? null,
+    userId,
   );
+  if (result.changes === 0) throw new HttpError(401, 'AUTH_REQUIRED', 'You must be signed in');
   return { rawToken, tokenHash, expiresAt };
 }
 
@@ -275,7 +277,7 @@ function clearSessionCookie(response: Response, secure: boolean): void {
 }
 
 function loadAuth(database: Database) {
-  return (request: Request, response: Response, next: NextFunction): void => {
+  return async (request: Request, response: Response, next: NextFunction): Promise<void> => {
     const rawToken = request.cookies?.[SESSION_COOKIE];
     if (typeof rawToken !== 'string' || rawToken.length < 20) {
       next();
@@ -283,7 +285,7 @@ function loadAuth(database: Database) {
     }
 
     const tokenHash = hashSessionToken(rawToken);
-    const row = database.prepare(`
+    const row = await database.prepare(`
       SELECT u.*
       FROM sessions s
       JOIN users u ON u.id = s.user_id
@@ -291,7 +293,7 @@ function loadAuth(database: Database) {
     `).get(tokenHash, now()) as unknown as UserRow | undefined;
 
     if (!row) {
-      database.prepare('DELETE FROM sessions WHERE token_hash = ?').run(tokenHash);
+      await database.prepare('DELETE FROM sessions WHERE token_hash = ?').run(tokenHash);
       clearSessionCookie(response, response.app.locals.cookieSecure as boolean);
       next();
       return;
@@ -302,10 +304,24 @@ function loadAuth(database: Database) {
   };
 }
 
-export function createApp(options: CreateAppOptions = {}): Express {
-  const database = (options.database as Database | undefined)
-    ?? openDatabase(options.databasePath ?? process.env.DATABASE_PATH ?? './data/forge.db');
-  if (options.database) initializeDatabase(database);
+export async function createApp(options: CreateAppOptions = {}): Promise<Express> {
+  let database = options.database;
+  if (database) {
+    await initializeDatabase(database);
+  } else {
+    const remoteUrl = options.databaseUrl ?? process.env.TURSO_DATABASE_URL?.trim();
+    const authToken = options.databaseAuthToken ?? process.env.TURSO_AUTH_TOKEN?.trim();
+    if (!remoteUrl && authToken) {
+      throw new Error('TURSO_DATABASE_URL is required when TURSO_AUTH_TOKEN is configured');
+    }
+    const localPath = options.databasePath ?? process.env.DATABASE_PATH;
+    if (process.env.NODE_ENV === 'production' && !remoteUrl && !localPath) {
+      throw new Error('Production requires TURSO_DATABASE_URL and TURSO_AUTH_TOKEN, or an explicit persistent DATABASE_PATH');
+    }
+    database = await openDatabase(remoteUrl
+      ? { url: remoteUrl, authToken }
+      : { path: localPath ?? './data/forge.db' });
+  }
 
   const envSessionDays = Number(process.env.SESSION_DAYS ?? 30);
   const sessionDays = options.sessionDays ?? (Number.isFinite(envSessionDays) && envSessionDays > 0 ? envSessionDays : 30);
@@ -360,8 +376,8 @@ export function createApp(options: CreateAppOptions = {}): Express {
     sendData(response, { status: 'ok' });
   });
 
-  app.get('/api/auth/status', (_request, response) => {
-    const userCount = database.prepare('SELECT COUNT(*) AS count FROM users').get() as unknown as { count: number };
+  app.get('/api/auth/status', async (_request, response) => {
+    const userCount = await database.prepare('SELECT COUNT(*) AS count FROM users').get() as unknown as { count: number };
     const auth = response.locals.auth as AuthState | undefined;
     sendData(response, {
       setupRequired: Number(userCount.count) === 0,
@@ -371,7 +387,7 @@ export function createApp(options: CreateAppOptions = {}): Express {
   });
 
   app.post('/api/auth/setup', async (request, response) => {
-    const existingUsers = database.prepare('SELECT COUNT(*) AS count FROM users').get() as unknown as { count: number };
+    const existingUsers = await database.prepare('SELECT COUNT(*) AS count FROM users').get() as unknown as { count: number };
     if (Number(existingUsers.count) !== 0) {
       throw new HttpError(409, 'ALREADY_CONFIGURED', 'Initial setup has already been completed');
     }
@@ -380,20 +396,20 @@ export function createApp(options: CreateAppOptions = {}): Express {
     let userId: number;
 
     try {
-      userId = runTransaction(database, () => {
-        const count = database.prepare('SELECT COUNT(*) AS count FROM users').get() as unknown as { count: number };
+      userId = await runTransaction(database, async () => {
+        const count = await database.prepare('SELECT COUNT(*) AS count FROM users').get() as unknown as { count: number };
         if (Number(count.count) !== 0) {
           throw new HttpError(409, 'ALREADY_CONFIGURED', 'Initial setup has already been completed');
         }
 
         const timestamp = now();
-        const result = database.prepare(`
+        const result = await database.prepare(`
           INSERT INTO users (username, password_hash, role, is_active, created_at, updated_at)
           VALUES (?, ?, 'admin', 1, ?, ?)
         `).run(username, passwordHash, timestamp, timestamp);
         const id = Number(result.lastInsertRowid);
-        seedUserDefaults(database, id);
-        writeAudit(database, {
+        await seedUserDefaults(database, id);
+        await writeAudit(database, {
           actorUserId: id,
           action: 'system.setup',
           targetType: 'user',
@@ -411,22 +427,22 @@ export function createApp(options: CreateAppOptions = {}): Express {
       throw error;
     }
 
-    const session = createSession(database, userId, sessionDays, request);
+    const session = await createSession(database, userId, sessionDays, request);
     setSessionCookie(response, session.rawToken, session.expiresAt, cookieSecure);
-    const row = database.prepare('SELECT * FROM users WHERE id = ?').get(userId) as unknown as UserRow;
+    const row = await database.prepare('SELECT * FROM users WHERE id = ?').get(userId) as unknown as UserRow;
     sendData(response, { user: publicUser(row) }, 201);
   });
 
   app.post('/api/auth/login', loginLimiter, async (request, response) => {
     const { username, password } = loginSchema.parse(request.body);
-    const row = database.prepare('SELECT * FROM users WHERE username = ?').get(username) as unknown as UserRow | undefined;
+    const row = await database.prepare('SELECT * FROM users WHERE username = ?').get(username) as unknown as UserRow | undefined;
     if (row?.requires_password_setup) {
       throw new HttpError(409, 'PASSWORD_SETUP_REQUIRED', 'Activate this account with its invite code before signing in');
     }
     const valid = row ? await verifyPassword(password, row.password_hash) : false;
 
     if (!row || !valid) {
-      writeAudit(database, {
+      await writeAudit(database, {
         action: 'auth.login_failed',
         targetType: 'user',
         metadata: { username },
@@ -435,7 +451,7 @@ export function createApp(options: CreateAppOptions = {}): Express {
       throw new HttpError(401, 'INVALID_CREDENTIALS', 'Username or password is incorrect');
     }
     if (!row.is_active) {
-      writeAudit(database, {
+      await writeAudit(database, {
         actorUserId: row.id,
         action: 'auth.login_disabled',
         targetType: 'user',
@@ -445,10 +461,10 @@ export function createApp(options: CreateAppOptions = {}): Express {
       throw new HttpError(403, 'ACCOUNT_DISABLED', 'This account has been disabled');
     }
 
-    const session = createSession(database, row.id, sessionDays, request);
+    const session = await createSession(database, row.id, sessionDays, request);
     const timestamp = now();
-    database.prepare('UPDATE users SET last_login_at = ?, updated_at = ? WHERE id = ?').run(timestamp, timestamp, row.id);
-    writeAudit(database, {
+    await database.prepare('UPDATE users SET last_login_at = ?, updated_at = ? WHERE id = ?').run(timestamp, timestamp, row.id);
+    await writeAudit(database, {
       actorUserId: row.id,
       action: 'auth.login',
       targetType: 'user',
@@ -456,13 +472,13 @@ export function createApp(options: CreateAppOptions = {}): Express {
       ipAddress: requestIp(request),
     });
     setSessionCookie(response, session.rawToken, session.expiresAt, cookieSecure);
-    const refreshed = database.prepare('SELECT * FROM users WHERE id = ?').get(row.id) as unknown as UserRow;
+    const refreshed = await database.prepare('SELECT * FROM users WHERE id = ?').get(row.id) as unknown as UserRow;
     sendData(response, { user: publicUser(refreshed) });
   });
 
   app.post('/api/auth/activate', activationLimiter, async (request, response) => {
     const input = activationSchema.parse(request.body);
-    const current = database.prepare('SELECT * FROM users WHERE username = ?')
+    const current = await database.prepare('SELECT * FROM users WHERE username = ?')
       .get(input.username) as unknown as UserRow | undefined;
     if (!current || !current.requires_password_setup || !verifyInviteCode(input.inviteCode, current.invite_code_hash)) {
       throw new HttpError(400, 'INVALID_INVITE_CODE', 'Username or invite code is invalid');
@@ -473,20 +489,20 @@ export function createApp(options: CreateAppOptions = {}): Express {
 
     const passwordHash = await hashPassword(input.newPassword);
     const timestamp = now();
-    runTransaction(database, () => {
-      const latest = database.prepare('SELECT * FROM users WHERE id = ?').get(current.id) as unknown as UserRow | undefined;
+    await runTransaction(database, async () => {
+      const latest = await database.prepare('SELECT * FROM users WHERE id = ?').get(current.id) as unknown as UserRow | undefined;
       if (!latest || !latest.requires_password_setup || !verifyInviteCode(input.inviteCode, latest.invite_code_hash)) {
         throw new HttpError(400, 'INVALID_INVITE_CODE', 'Username or invite code is invalid');
       }
       if (!latest.is_active) throw new HttpError(403, 'ACCOUNT_DISABLED', 'This account has been disabled');
-      database.prepare(`
+      await database.prepare(`
         UPDATE users
         SET password_hash = ?, requires_password_setup = 0, invite_code_hash = NULL,
             last_login_at = ?, updated_at = ?
         WHERE id = ?
       `).run(passwordHash, timestamp, timestamp, latest.id);
-      database.prepare('DELETE FROM sessions WHERE user_id = ?').run(latest.id);
-      writeAudit(database, {
+      await database.prepare('DELETE FROM sessions WHERE user_id = ?').run(latest.id);
+      await writeAudit(database, {
         actorUserId: latest.id,
         action: 'auth.account_activated',
         targetType: 'user',
@@ -495,17 +511,17 @@ export function createApp(options: CreateAppOptions = {}): Express {
       });
     });
 
-    const session = createSession(database, current.id, sessionDays, request);
+    const session = await createSession(database, current.id, sessionDays, request);
     setSessionCookie(response, session.rawToken, session.expiresAt, cookieSecure);
-    const activated = database.prepare('SELECT * FROM users WHERE id = ?').get(current.id) as unknown as UserRow;
+    const activated = await database.prepare('SELECT * FROM users WHERE id = ?').get(current.id) as unknown as UserRow;
     sendData(response, { user: publicUser(activated) });
   });
 
-  app.post('/api/auth/logout', (_request, response) => {
+  app.post('/api/auth/logout', async (_request, response) => {
     const auth = response.locals.auth as AuthState | undefined;
     if (auth) {
-      database.prepare('DELETE FROM sessions WHERE token_hash = ?').run(auth.tokenHash);
-      writeAudit(database, {
+      await database.prepare('DELETE FROM sessions WHERE token_hash = ?').run(auth.tokenHash);
+      await writeAudit(database, {
         actorUserId: auth.user.id,
         action: 'auth.logout',
         targetType: 'user',
@@ -520,26 +536,26 @@ export function createApp(options: CreateAppOptions = {}): Express {
     sendData(response, { user: getAuth(response).user });
   });
 
-  app.patch('/api/auth/profile', (request, response) => {
+  app.patch('/api/auth/profile', async (request, response) => {
     const auth = getAuth(response);
     const { username } = updateProfileSchema.parse(request.body);
 
     try {
-      runTransaction(database, () => {
-        const current = database.prepare('SELECT * FROM users WHERE id = ?')
+      await runTransaction(database, async () => {
+        const current = await database.prepare('SELECT * FROM users WHERE id = ?')
           .get(auth.user.id) as unknown as UserRow | undefined;
         if (!current) throw new HttpError(401, 'AUTH_REQUIRED', 'You must be signed in');
         if (current.username === username) return;
 
-        const conflictingUser = database.prepare('SELECT id FROM users WHERE username = ? AND id != ?')
+        const conflictingUser = await database.prepare('SELECT id FROM users WHERE username = ? AND id != ?')
           .get(username, current.id) as unknown as { id: number } | undefined;
         if (conflictingUser) {
           throw new HttpError(409, 'USERNAME_EXISTS', 'That username is already in use');
         }
 
-        database.prepare('UPDATE users SET username = ?, updated_at = ? WHERE id = ?')
+        await database.prepare('UPDATE users SET username = ?, updated_at = ? WHERE id = ?')
           .run(username, now(), current.id);
-        writeAudit(database, {
+        await writeAudit(database, {
           actorUserId: current.id,
           action: 'auth.username_changed',
           targetType: 'user',
@@ -556,7 +572,7 @@ export function createApp(options: CreateAppOptions = {}): Express {
       throw error;
     }
 
-    const refreshed = database.prepare('SELECT * FROM users WHERE id = ?')
+    const refreshed = await database.prepare('SELECT * FROM users WHERE id = ?')
       .get(auth.user.id) as unknown as UserRow;
     sendData(response, { user: publicUser(refreshed) });
   });
@@ -564,18 +580,18 @@ export function createApp(options: CreateAppOptions = {}): Express {
   app.post('/api/auth/change-password', async (request, response) => {
     const auth = getAuth(response);
     const { currentPassword, newPassword } = changePasswordSchema.parse(request.body);
-    const row = database.prepare('SELECT * FROM users WHERE id = ?').get(auth.user.id) as unknown as UserRow;
+    const row = await database.prepare('SELECT * FROM users WHERE id = ?').get(auth.user.id) as unknown as UserRow;
     if (!await verifyPassword(currentPassword, row.password_hash)) {
       throw new HttpError(400, 'INVALID_CURRENT_PASSWORD', 'Current password is incorrect');
     }
 
     const passwordHash = await hashPassword(newPassword);
     const timestamp = now();
-    runTransaction(database, () => {
-      database.prepare('UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?')
+    await runTransaction(database, async () => {
+      await database.prepare('UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?')
         .run(passwordHash, timestamp, auth.user.id);
-      database.prepare('DELETE FROM sessions WHERE user_id = ?').run(auth.user.id);
-      writeAudit(database, {
+      await database.prepare('DELETE FROM sessions WHERE user_id = ?').run(auth.user.id);
+      await writeAudit(database, {
         actorUserId: auth.user.id,
         action: 'auth.password_changed',
         targetType: 'user',
@@ -584,7 +600,7 @@ export function createApp(options: CreateAppOptions = {}): Express {
       });
     });
 
-    const session = createSession(database, auth.user.id, sessionDays, request);
+    const session = await createSession(database, auth.user.id, sessionDays, request);
     setSessionCookie(response, session.rawToken, session.expiresAt, cookieSecure);
     sendData(response, { success: true });
   });
@@ -693,15 +709,15 @@ function registerBodyPartRoutes(app: Express, database: Database): void {
     latestRecordedAt: row.latest_recorded_at == null ? null : String(row.latest_recorded_at),
   });
 
-  const getBodyPart = (id: number, userId: number) => {
-    const row = database.prepare(`${summarySql} WHERE bp.id = ? AND bp.user_id = ? GROUP BY bp.id`)
+  const getBodyPart = async (id: number, userId: number) => {
+    const row = await database.prepare(`${summarySql} WHERE bp.id = ? AND bp.user_id = ? GROUP BY bp.id`)
       .get(id, userId) as unknown as Record<string, unknown> | undefined;
     if (!row) throw new HttpError(404, 'BODY_PART_NOT_FOUND', 'Body part not found');
     return mapBodyPart(row);
   };
 
-  const ensureBodyPart = (id: number, userId: number): void => {
-    const row = database.prepare('SELECT id FROM body_parts WHERE id = ? AND user_id = ?').get(id, userId);
+  const ensureBodyPart = async (id: number, userId: number): Promise<void> => {
+    const row = await database.prepare('SELECT id FROM body_parts WHERE id = ? AND user_id = ?').get(id, userId);
     if (!row) throw new HttpError(404, 'BODY_PART_NOT_FOUND', 'Body part not found');
   };
 
@@ -715,177 +731,192 @@ function registerBodyPartRoutes(app: Express, database: Database): void {
     updatedAt: String(row.updated_at),
   });
 
-  app.get('/api/body-parts', (_request, response) => {
+  app.get('/api/body-parts', async (_request, response) => {
     const auth = getAuth(response);
-    const rows = database.prepare(`${summarySql} WHERE bp.user_id = ? GROUP BY bp.id ORDER BY bp.sort_order ASC, bp.id ASC`)
+    const rows = await database.prepare(`${summarySql} WHERE bp.user_id = ? GROUP BY bp.id ORDER BY bp.sort_order ASC, bp.id ASC`)
       .all(auth.user.id) as unknown as Record<string, unknown>[];
     sendData(response, { bodyParts: rows.map(mapBodyPart) });
   });
 
-  app.put('/api/body-parts/order', (request, response) => {
+  app.put('/api/body-parts/order', async (request, response) => {
     const auth = getAuth(response);
     const { ids } = resourceOrderSchema.parse(request.body);
     const timestamp = now();
-    runTransaction(database, () => {
-      const ownedRows = database.prepare('SELECT id FROM body_parts WHERE user_id = ?')
+    await runTransaction(database, async () => {
+      const ownedRows = await database.prepare('SELECT id FROM body_parts WHERE user_id = ?')
         .all(auth.user.id) as unknown as Array<{ id: number }>;
       requireExactResourceOrder(ids, ownedRows);
       const update = database.prepare(`
         UPDATE body_parts SET sort_order = ?, updated_at = ? WHERE id = ? AND user_id = ?
       `);
-      ids.forEach((id, position) => update.run(position, timestamp, id, auth.user.id));
-      writeAudit(database, {
+      for (const [position, id] of ids.entries()) {
+        await update.run(position, timestamp, id, auth.user.id);
+      }
+      await writeAudit(database, {
         actorUserId: auth.user.id,
         action: 'body_parts.reordered',
         targetType: 'body_part',
         ipAddress: requestIp(request),
       });
     });
-    const rows = database.prepare(`${summarySql} WHERE bp.user_id = ? GROUP BY bp.id ORDER BY bp.sort_order ASC, bp.id ASC`)
+    const rows = await database.prepare(`${summarySql} WHERE bp.user_id = ? GROUP BY bp.id ORDER BY bp.sort_order ASC, bp.id ASC`)
       .all(auth.user.id) as unknown as Record<string, unknown>[];
     sendData(response, { bodyParts: rows.map(mapBodyPart) });
   });
 
-  app.post('/api/body-parts', (request, response) => {
+  app.post('/api/body-parts', async (request, response) => {
     const auth = getAuth(response);
     const input = bodyPartCreateSchema.parse(request.body);
     const timestamp = now();
     let result;
     try {
-      result = database.prepare(`
+      result = await database.prepare(`
         INSERT INTO body_parts (user_id, name, unit, color, sort_order, created_at, updated_at)
-        VALUES (?, ?, ?, ?, (
-          SELECT COALESCE(MAX(sort_order), -1) + 1 FROM body_parts WHERE user_id = ?
-        ), ?, ?)
-      `).run(auth.user.id, input.name, input.unit, input.color, auth.user.id, timestamp, timestamp);
+        SELECT users.id, ?, ?, ?, (
+          SELECT COALESCE(MAX(sort_order), -1) + 1 FROM body_parts WHERE user_id = users.id
+        ), ?, ?
+        FROM users
+        WHERE users.id = ? AND users.is_active = 1
+      `).run(input.name, input.unit, input.color, timestamp, timestamp, auth.user.id);
     } catch (error) {
       if (sqliteConflict(error)) throw new HttpError(409, 'BODY_PART_EXISTS', 'A body part with that name already exists');
       throw error;
     }
+    if (result.changes === 0) throw new HttpError(401, 'AUTH_REQUIRED', 'You must be signed in');
     const id = Number(result.lastInsertRowid);
-    writeAudit(database, {
+    await writeAudit(database, {
       actorUserId: auth.user.id,
       action: 'body_part.created',
       targetType: 'body_part',
       targetId: id,
       ipAddress: requestIp(request),
     });
-    sendData(response, { bodyPart: getBodyPart(id, auth.user.id) }, 201);
+    sendData(response, { bodyPart: await getBodyPart(id, auth.user.id) }, 201);
   });
 
-  app.patch('/api/body-parts/:bodyPartId', (request, response) => {
+  app.patch('/api/body-parts/:bodyPartId', async (request, response) => {
     const auth = getAuth(response);
     const id = parseId(request.params.bodyPartId);
     const input = bodyPartUpdateSchema.parse(request.body);
-    const current = database.prepare('SELECT * FROM body_parts WHERE id = ? AND user_id = ?')
-      .get(id, auth.user.id) as unknown as Record<string, unknown> | undefined;
-    if (!current) throw new HttpError(404, 'BODY_PART_NOT_FOUND', 'Body part not found');
-    if (input.unit !== undefined && input.unit !== String(current.unit)) {
-      const record = database.prepare('SELECT 1 FROM measurements WHERE body_part_id = ? LIMIT 1').get(id);
-      if (record) {
-        throw new HttpError(
-          409,
-          'BODY_PART_UNIT_LOCKED',
-          'Unit cannot be changed after measurements have been recorded; delete those records first',
-        );
-      }
-    }
-
     try {
-      database.prepare(`
-        UPDATE body_parts SET name = ?, unit = ?, color = ?, updated_at = ?
-        WHERE id = ? AND user_id = ?
-      `).run(
-        input.name ?? String(current.name),
-        input.unit ?? String(current.unit),
-        input.color ?? String(current.color),
-        now(),
-        id,
-        auth.user.id,
-      );
+      await runTransaction(database, async () => {
+        const current = await database.prepare('SELECT * FROM body_parts WHERE id = ? AND user_id = ?')
+          .get(id, auth.user.id) as unknown as Record<string, unknown> | undefined;
+        if (!current) throw new HttpError(404, 'BODY_PART_NOT_FOUND', 'Body part not found');
+        if (input.unit !== undefined && input.unit !== String(current.unit)) {
+          const record = await database.prepare('SELECT 1 FROM measurements WHERE body_part_id = ? LIMIT 1').get(id);
+          if (record) {
+            throw new HttpError(
+              409,
+              'BODY_PART_UNIT_LOCKED',
+              'Unit cannot be changed after measurements have been recorded; delete those records first',
+            );
+          }
+        }
+
+        const result = await database.prepare(`
+          UPDATE body_parts SET name = ?, unit = ?, color = ?, updated_at = ?
+          WHERE id = ? AND user_id = ?
+        `).run(
+          input.name ?? String(current.name),
+          input.unit ?? String(current.unit),
+          input.color ?? String(current.color),
+          now(),
+          id,
+          auth.user.id,
+        );
+        if (result.changes === 0) throw new HttpError(404, 'BODY_PART_NOT_FOUND', 'Body part not found');
+        await writeAudit(database, {
+          actorUserId: auth.user.id,
+          action: 'body_part.updated',
+          targetType: 'body_part',
+          targetId: id,
+          ipAddress: requestIp(request),
+        });
+      });
     } catch (error) {
       if (sqliteConflict(error)) throw new HttpError(409, 'BODY_PART_EXISTS', 'A body part with that name already exists');
       throw error;
     }
-    writeAudit(database, {
-      actorUserId: auth.user.id,
-      action: 'body_part.updated',
-      targetType: 'body_part',
-      targetId: id,
-      ipAddress: requestIp(request),
-    });
-    sendData(response, { bodyPart: getBodyPart(id, auth.user.id) });
+    sendData(response, { bodyPart: await getBodyPart(id, auth.user.id) });
   });
 
-  app.delete('/api/body-parts/:bodyPartId', (request, response) => {
+  app.delete('/api/body-parts/:bodyPartId', async (request, response) => {
     const auth = getAuth(response);
     const id = parseId(request.params.bodyPartId);
-    const current = database.prepare('SELECT name FROM body_parts WHERE id = ? AND user_id = ?')
+    const current = await database.prepare('SELECT name FROM body_parts WHERE id = ? AND user_id = ?')
       .get(id, auth.user.id) as unknown as { name: string } | undefined;
     if (!current) throw new HttpError(404, 'BODY_PART_NOT_FOUND', 'Body part not found');
-    database.prepare('DELETE FROM body_parts WHERE id = ? AND user_id = ?').run(id, auth.user.id);
-    writeAudit(database, {
-      actorUserId: auth.user.id,
-      action: 'body_part.deleted',
-      targetType: 'body_part',
-      targetId: id,
-      ipAddress: requestIp(request),
+    await runTransaction(database, async () => {
+      await database.prepare('DELETE FROM measurements WHERE body_part_id = ?').run(id);
+      await database.prepare('DELETE FROM body_parts WHERE id = ? AND user_id = ?').run(id, auth.user.id);
+      await writeAudit(database, {
+        actorUserId: auth.user.id,
+        action: 'body_part.deleted',
+        targetType: 'body_part',
+        targetId: id,
+        ipAddress: requestIp(request),
+      });
     });
     sendData(response, { success: true });
   });
 
-  app.get('/api/body-parts/:bodyPartId/measurements', (request, response) => {
+  app.get('/api/body-parts/:bodyPartId/measurements', async (request, response) => {
     const auth = getAuth(response);
     const bodyPartId = parseId(request.params.bodyPartId);
-    ensureBodyPart(bodyPartId, auth.user.id);
-    const rows = database.prepare(`
+    await ensureBodyPart(bodyPartId, auth.user.id);
+    const rows = await database.prepare(`
       SELECT * FROM measurements WHERE body_part_id = ? ORDER BY recorded_at ASC, id ASC
     `).all(bodyPartId) as unknown as Record<string, unknown>[];
     sendData(response, { measurements: rows.map(mapMeasurement) });
   });
 
-  app.post('/api/body-parts/:bodyPartId/measurements', (request, response) => {
+  app.post('/api/body-parts/:bodyPartId/measurements', async (request, response) => {
     const auth = getAuth(response);
     const bodyPartId = parseId(request.params.bodyPartId);
-    ensureBodyPart(bodyPartId, auth.user.id);
+    await ensureBodyPart(bodyPartId, auth.user.id);
     const input = measurementCreateSchema.parse(request.body);
     const timestamp = now();
-    const result = database.prepare(`
+    const result = await database.prepare(`
       INSERT INTO measurements (body_part_id, value, recorded_at, note, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?)
+      SELECT bp.id, ?, ?, ?, ?, ?
+      FROM body_parts bp
+      WHERE bp.id = ? AND bp.user_id = ?
     `).run(
-      bodyPartId,
       input.value,
       asIsoDate(input.recordedAt),
       input.note?.trim() || null,
       timestamp,
       timestamp,
+      bodyPartId,
+      auth.user.id,
     );
+    if (result.changes === 0) throw new HttpError(404, 'BODY_PART_NOT_FOUND', 'Body part not found');
     const id = Number(result.lastInsertRowid);
-    writeAudit(database, {
+    await writeAudit(database, {
       actorUserId: auth.user.id,
       action: 'measurement.created',
       targetType: 'measurement',
       targetId: id,
       ipAddress: requestIp(request),
     });
-    const row = database.prepare('SELECT * FROM measurements WHERE id = ?').get(id) as unknown as Record<string, unknown>;
+    const row = await database.prepare('SELECT * FROM measurements WHERE id = ?').get(id) as unknown as Record<string, unknown>;
     sendData(response, { measurement: mapMeasurement(row) }, 201);
   });
 
-  app.patch('/api/body-parts/:bodyPartId/measurements/:measurementId', (request, response) => {
+  app.patch('/api/body-parts/:bodyPartId/measurements/:measurementId', async (request, response) => {
     const auth = getAuth(response);
     const bodyPartId = parseId(request.params.bodyPartId);
     const measurementId = parseId(request.params.measurementId);
-    ensureBodyPart(bodyPartId, auth.user.id);
-    const current = database.prepare(`
+    await ensureBodyPart(bodyPartId, auth.user.id);
+    const current = await database.prepare(`
       SELECT m.* FROM measurements m
       JOIN body_parts bp ON bp.id = m.body_part_id
       WHERE m.id = ? AND m.body_part_id = ? AND bp.user_id = ?
     `).get(measurementId, bodyPartId, auth.user.id) as unknown as Record<string, unknown> | undefined;
     if (!current) throw new HttpError(404, 'MEASUREMENT_NOT_FOUND', 'Measurement not found');
     const input = measurementUpdateSchema.parse(request.body);
-    database.prepare(`
+    await database.prepare(`
       UPDATE measurements SET value = ?, recorded_at = ?, note = ?, updated_at = ?
       WHERE id = ? AND body_part_id = ?
     `).run(
@@ -898,29 +929,29 @@ function registerBodyPartRoutes(app: Express, database: Database): void {
       measurementId,
       bodyPartId,
     );
-    writeAudit(database, {
+    await writeAudit(database, {
       actorUserId: auth.user.id,
       action: 'measurement.updated',
       targetType: 'measurement',
       targetId: measurementId,
       ipAddress: requestIp(request),
     });
-    const row = database.prepare('SELECT * FROM measurements WHERE id = ?').get(measurementId) as unknown as Record<string, unknown>;
+    const row = await database.prepare('SELECT * FROM measurements WHERE id = ?').get(measurementId) as unknown as Record<string, unknown>;
     sendData(response, { measurement: mapMeasurement(row) });
   });
 
-  app.delete('/api/body-parts/:bodyPartId/measurements/:measurementId', (request, response) => {
+  app.delete('/api/body-parts/:bodyPartId/measurements/:measurementId', async (request, response) => {
     const auth = getAuth(response);
     const bodyPartId = parseId(request.params.bodyPartId);
     const measurementId = parseId(request.params.measurementId);
-    ensureBodyPart(bodyPartId, auth.user.id);
-    const result = database.prepare(`
+    await ensureBodyPart(bodyPartId, auth.user.id);
+    const result = await database.prepare(`
       DELETE FROM measurements
       WHERE id = ? AND body_part_id = ?
         AND EXISTS (SELECT 1 FROM body_parts bp WHERE bp.id = measurements.body_part_id AND bp.user_id = ?)
     `).run(measurementId, bodyPartId, auth.user.id);
     if (Number(result.changes) === 0) throw new HttpError(404, 'MEASUREMENT_NOT_FOUND', 'Measurement not found');
-    writeAudit(database, {
+    await writeAudit(database, {
       actorUserId: auth.user.id,
       action: 'measurement.deleted',
       targetType: 'measurement',
@@ -990,15 +1021,15 @@ function registerExerciseRoutes(app: Express, database: Database): void {
     latestRecordedAt: row.latest_recorded_at == null ? null : String(row.latest_recorded_at),
   });
 
-  const getExercise = (id: number, userId: number) => {
-    const row = database.prepare(`${summarySql} WHERE e.id = ? AND e.user_id = ? GROUP BY e.id`)
+  const getExercise = async (id: number, userId: number) => {
+    const row = await database.prepare(`${summarySql} WHERE e.id = ? AND e.user_id = ? GROUP BY e.id`)
       .get(id, userId) as unknown as Record<string, unknown> | undefined;
     if (!row) throw new HttpError(404, 'EXERCISE_NOT_FOUND', 'Exercise not found');
     return mapExercise(row);
   };
 
-  const ensureExercise = (id: number, userId: number): void => {
-    const row = database.prepare('SELECT id FROM exercises WHERE id = ? AND user_id = ?').get(id, userId);
+  const ensureExercise = async (id: number, userId: number): Promise<void> => {
+    const row = await database.prepare('SELECT id FROM exercises WHERE id = ? AND user_id = ?').get(id, userId);
     if (!row) throw new HttpError(404, 'EXERCISE_NOT_FOUND', 'Exercise not found');
   };
 
@@ -1013,188 +1044,202 @@ function registerExerciseRoutes(app: Express, database: Database): void {
     updatedAt: String(row.updated_at),
   });
 
-  app.get('/api/exercises', (_request, response) => {
+  app.get('/api/exercises', async (_request, response) => {
     const auth = getAuth(response);
-    const rows = database.prepare(`${summarySql} WHERE e.user_id = ? GROUP BY e.id ORDER BY e.sort_order ASC, e.id ASC`)
+    const rows = await database.prepare(`${summarySql} WHERE e.user_id = ? GROUP BY e.id ORDER BY e.sort_order ASC, e.id ASC`)
       .all(auth.user.id) as unknown as Record<string, unknown>[];
     sendData(response, { exercises: rows.map(mapExercise) });
   });
 
-  app.put('/api/exercises/order', (request, response) => {
+  app.put('/api/exercises/order', async (request, response) => {
     const auth = getAuth(response);
     const { ids } = resourceOrderSchema.parse(request.body);
     const timestamp = now();
-    runTransaction(database, () => {
-      const ownedRows = database.prepare('SELECT id FROM exercises WHERE user_id = ?')
+    await runTransaction(database, async () => {
+      const ownedRows = await database.prepare('SELECT id FROM exercises WHERE user_id = ?')
         .all(auth.user.id) as unknown as Array<{ id: number }>;
       requireExactResourceOrder(ids, ownedRows);
       const update = database.prepare(`
         UPDATE exercises SET sort_order = ?, updated_at = ? WHERE id = ? AND user_id = ?
       `);
-      ids.forEach((id, position) => update.run(position, timestamp, id, auth.user.id));
-      writeAudit(database, {
+      for (const [position, id] of ids.entries()) {
+        await update.run(position, timestamp, id, auth.user.id);
+      }
+      await writeAudit(database, {
         actorUserId: auth.user.id,
         action: 'exercises.reordered',
         targetType: 'exercise',
         ipAddress: requestIp(request),
       });
     });
-    const rows = database.prepare(`${summarySql} WHERE e.user_id = ? GROUP BY e.id ORDER BY e.sort_order ASC, e.id ASC`)
+    const rows = await database.prepare(`${summarySql} WHERE e.user_id = ? GROUP BY e.id ORDER BY e.sort_order ASC, e.id ASC`)
       .all(auth.user.id) as unknown as Record<string, unknown>[];
     sendData(response, { exercises: rows.map(mapExercise) });
   });
 
-  app.post('/api/exercises', (request, response) => {
+  app.post('/api/exercises', async (request, response) => {
     const auth = getAuth(response);
     const input = exerciseCreateSchema.parse(request.body);
     const timestamp = now();
     let result;
     try {
-      result = database.prepare(`
+      result = await database.prepare(`
         INSERT INTO exercises (user_id, name, category, unit, color, sort_order, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, (
-          SELECT COALESCE(MAX(sort_order), -1) + 1 FROM exercises WHERE user_id = ?
-        ), ?, ?)
+        SELECT users.id, ?, ?, ?, ?, (
+          SELECT COALESCE(MAX(sort_order), -1) + 1 FROM exercises WHERE user_id = users.id
+        ), ?, ?
+        FROM users
+        WHERE users.id = ? AND users.is_active = 1
       `).run(
-        auth.user.id,
         input.name,
         input.category,
         input.unit,
         input.color,
+        timestamp,
+        timestamp,
         auth.user.id,
-        timestamp,
-        timestamp,
       );
     } catch (error) {
       if (sqliteConflict(error)) throw new HttpError(409, 'EXERCISE_EXISTS', 'An exercise with that name already exists');
       throw error;
     }
+    if (result.changes === 0) throw new HttpError(401, 'AUTH_REQUIRED', 'You must be signed in');
     const id = Number(result.lastInsertRowid);
-    writeAudit(database, {
+    await writeAudit(database, {
       actorUserId: auth.user.id,
       action: 'exercise.created',
       targetType: 'exercise',
       targetId: id,
       ipAddress: requestIp(request),
     });
-    sendData(response, { exercise: getExercise(id, auth.user.id) }, 201);
+    sendData(response, { exercise: await getExercise(id, auth.user.id) }, 201);
   });
 
-  app.patch('/api/exercises/:exerciseId', (request, response) => {
+  app.patch('/api/exercises/:exerciseId', async (request, response) => {
     const auth = getAuth(response);
     const id = parseId(request.params.exerciseId);
     const input = exerciseUpdateSchema.parse(request.body);
-    const current = database.prepare('SELECT * FROM exercises WHERE id = ? AND user_id = ?')
-      .get(id, auth.user.id) as unknown as Record<string, unknown> | undefined;
-    if (!current) throw new HttpError(404, 'EXERCISE_NOT_FOUND', 'Exercise not found');
-    if (input.unit !== undefined && input.unit !== String(current.unit)) {
-      const record = database.prepare('SELECT 1 FROM lift_records WHERE exercise_id = ? LIMIT 1').get(id);
-      if (record) {
-        throw new HttpError(
-          409,
-          'EXERCISE_UNIT_LOCKED',
-          'Unit cannot be changed after lift records have been recorded; delete those records first',
-        );
-      }
-    }
-
     try {
-      database.prepare(`
-        UPDATE exercises SET name = ?, category = ?, unit = ?, color = ?, updated_at = ?
-        WHERE id = ? AND user_id = ?
-      `).run(
-        input.name ?? String(current.name),
-        input.category ?? String(current.category),
-        input.unit ?? String(current.unit),
-        input.color ?? String(current.color),
-        now(),
-        id,
-        auth.user.id,
-      );
+      await runTransaction(database, async () => {
+        const current = await database.prepare('SELECT * FROM exercises WHERE id = ? AND user_id = ?')
+          .get(id, auth.user.id) as unknown as Record<string, unknown> | undefined;
+        if (!current) throw new HttpError(404, 'EXERCISE_NOT_FOUND', 'Exercise not found');
+        if (input.unit !== undefined && input.unit !== String(current.unit)) {
+          const record = await database.prepare('SELECT 1 FROM lift_records WHERE exercise_id = ? LIMIT 1').get(id);
+          if (record) {
+            throw new HttpError(
+              409,
+              'EXERCISE_UNIT_LOCKED',
+              'Unit cannot be changed after lift records have been recorded; delete those records first',
+            );
+          }
+        }
+
+        const result = await database.prepare(`
+          UPDATE exercises SET name = ?, category = ?, unit = ?, color = ?, updated_at = ?
+          WHERE id = ? AND user_id = ?
+        `).run(
+          input.name ?? String(current.name),
+          input.category ?? String(current.category),
+          input.unit ?? String(current.unit),
+          input.color ?? String(current.color),
+          now(),
+          id,
+          auth.user.id,
+        );
+        if (result.changes === 0) throw new HttpError(404, 'EXERCISE_NOT_FOUND', 'Exercise not found');
+        await writeAudit(database, {
+          actorUserId: auth.user.id,
+          action: 'exercise.updated',
+          targetType: 'exercise',
+          targetId: id,
+          ipAddress: requestIp(request),
+        });
+      });
     } catch (error) {
       if (sqliteConflict(error)) throw new HttpError(409, 'EXERCISE_EXISTS', 'An exercise with that name already exists');
       throw error;
     }
-    writeAudit(database, {
-      actorUserId: auth.user.id,
-      action: 'exercise.updated',
-      targetType: 'exercise',
-      targetId: id,
-      ipAddress: requestIp(request),
-    });
-    sendData(response, { exercise: getExercise(id, auth.user.id) });
+    sendData(response, { exercise: await getExercise(id, auth.user.id) });
   });
 
-  app.delete('/api/exercises/:exerciseId', (request, response) => {
+  app.delete('/api/exercises/:exerciseId', async (request, response) => {
     const auth = getAuth(response);
     const id = parseId(request.params.exerciseId);
-    const current = database.prepare('SELECT name FROM exercises WHERE id = ? AND user_id = ?')
+    const current = await database.prepare('SELECT name FROM exercises WHERE id = ? AND user_id = ?')
       .get(id, auth.user.id) as unknown as { name: string } | undefined;
     if (!current) throw new HttpError(404, 'EXERCISE_NOT_FOUND', 'Exercise not found');
-    database.prepare('DELETE FROM exercises WHERE id = ? AND user_id = ?').run(id, auth.user.id);
-    writeAudit(database, {
-      actorUserId: auth.user.id,
-      action: 'exercise.deleted',
-      targetType: 'exercise',
-      targetId: id,
-      ipAddress: requestIp(request),
+    await runTransaction(database, async () => {
+      await database.prepare('DELETE FROM lift_records WHERE exercise_id = ?').run(id);
+      await database.prepare('DELETE FROM exercises WHERE id = ? AND user_id = ?').run(id, auth.user.id);
+      await writeAudit(database, {
+        actorUserId: auth.user.id,
+        action: 'exercise.deleted',
+        targetType: 'exercise',
+        targetId: id,
+        ipAddress: requestIp(request),
+      });
     });
     sendData(response, { success: true });
   });
 
-  app.get('/api/exercises/:exerciseId/lifts', (request, response) => {
+  app.get('/api/exercises/:exerciseId/lifts', async (request, response) => {
     const auth = getAuth(response);
     const exerciseId = parseId(request.params.exerciseId);
-    ensureExercise(exerciseId, auth.user.id);
-    const rows = database.prepare(`
+    await ensureExercise(exerciseId, auth.user.id);
+    const rows = await database.prepare(`
       SELECT * FROM lift_records WHERE exercise_id = ? ORDER BY recorded_at ASC, id ASC
     `).all(exerciseId) as unknown as Record<string, unknown>[];
     sendData(response, { lifts: rows.map(mapLift) });
   });
 
-  app.post('/api/exercises/:exerciseId/lifts', (request, response) => {
+  app.post('/api/exercises/:exerciseId/lifts', async (request, response) => {
     const auth = getAuth(response);
     const exerciseId = parseId(request.params.exerciseId);
-    ensureExercise(exerciseId, auth.user.id);
+    await ensureExercise(exerciseId, auth.user.id);
     const input = liftCreateSchema.parse(request.body);
     const timestamp = now();
-    const result = database.prepare(`
+    const result = await database.prepare(`
       INSERT INTO lift_records (exercise_id, weight, reps, recorded_at, note, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      SELECT e.id, ?, ?, ?, ?, ?, ?
+      FROM exercises e
+      WHERE e.id = ? AND e.user_id = ?
     `).run(
-      exerciseId,
       input.weight,
       input.reps,
       asIsoDate(input.recordedAt),
       input.note?.trim() || null,
       timestamp,
       timestamp,
+      exerciseId,
+      auth.user.id,
     );
+    if (result.changes === 0) throw new HttpError(404, 'EXERCISE_NOT_FOUND', 'Exercise not found');
     const id = Number(result.lastInsertRowid);
-    writeAudit(database, {
+    await writeAudit(database, {
       actorUserId: auth.user.id,
       action: 'lift.created',
       targetType: 'lift',
       targetId: id,
       ipAddress: requestIp(request),
     });
-    const row = database.prepare('SELECT * FROM lift_records WHERE id = ?').get(id) as unknown as Record<string, unknown>;
+    const row = await database.prepare('SELECT * FROM lift_records WHERE id = ?').get(id) as unknown as Record<string, unknown>;
     sendData(response, { lift: mapLift(row) }, 201);
   });
 
-  app.patch('/api/exercises/:exerciseId/lifts/:liftId', (request, response) => {
+  app.patch('/api/exercises/:exerciseId/lifts/:liftId', async (request, response) => {
     const auth = getAuth(response);
     const exerciseId = parseId(request.params.exerciseId);
     const liftId = parseId(request.params.liftId);
-    ensureExercise(exerciseId, auth.user.id);
-    const current = database.prepare(`
+    await ensureExercise(exerciseId, auth.user.id);
+    const current = await database.prepare(`
       SELECT l.* FROM lift_records l
       JOIN exercises e ON e.id = l.exercise_id
       WHERE l.id = ? AND l.exercise_id = ? AND e.user_id = ?
     `).get(liftId, exerciseId, auth.user.id) as unknown as Record<string, unknown> | undefined;
     if (!current) throw new HttpError(404, 'LIFT_NOT_FOUND', 'Lift record not found');
     const input = liftUpdateSchema.parse(request.body);
-    database.prepare(`
+    await database.prepare(`
       UPDATE lift_records SET weight = ?, reps = ?, recorded_at = ?, note = ?, updated_at = ?
       WHERE id = ? AND exercise_id = ?
     `).run(
@@ -1208,29 +1253,29 @@ function registerExerciseRoutes(app: Express, database: Database): void {
       liftId,
       exerciseId,
     );
-    writeAudit(database, {
+    await writeAudit(database, {
       actorUserId: auth.user.id,
       action: 'lift.updated',
       targetType: 'lift',
       targetId: liftId,
       ipAddress: requestIp(request),
     });
-    const row = database.prepare('SELECT * FROM lift_records WHERE id = ?').get(liftId) as unknown as Record<string, unknown>;
+    const row = await database.prepare('SELECT * FROM lift_records WHERE id = ?').get(liftId) as unknown as Record<string, unknown>;
     sendData(response, { lift: mapLift(row) });
   });
 
-  app.delete('/api/exercises/:exerciseId/lifts/:liftId', (request, response) => {
+  app.delete('/api/exercises/:exerciseId/lifts/:liftId', async (request, response) => {
     const auth = getAuth(response);
     const exerciseId = parseId(request.params.exerciseId);
     const liftId = parseId(request.params.liftId);
-    ensureExercise(exerciseId, auth.user.id);
-    const result = database.prepare(`
+    await ensureExercise(exerciseId, auth.user.id);
+    const result = await database.prepare(`
       DELETE FROM lift_records
       WHERE id = ? AND exercise_id = ?
         AND EXISTS (SELECT 1 FROM exercises e WHERE e.id = lift_records.exercise_id AND e.user_id = ?)
     `).run(liftId, exerciseId, auth.user.id);
     if (Number(result.changes) === 0) throw new HttpError(404, 'LIFT_NOT_FOUND', 'Lift record not found');
-    writeAudit(database, {
+    await writeAudit(database, {
       actorUserId: auth.user.id,
       action: 'lift.deleted',
       targetType: 'lift',
@@ -1241,14 +1286,14 @@ function registerExerciseRoutes(app: Express, database: Database): void {
   });
 }
 
-function readWorkoutPlan(database: Database, userId: number, redactNotes = false) {
-  seedUserPlans(database, userId);
-  const days = database.prepare(`
+async function readWorkoutPlan(database: Database, userId: number, redactNotes = false) {
+  await seedUserPlans(database, userId);
+  const days = await database.prepare(`
     SELECT * FROM workout_days WHERE user_id = ? ORDER BY day_of_week ASC
   `).all(userId) as unknown as Record<string, unknown>[];
   return {
-    days: days.map((day) => {
-      const exercises = database.prepare(`
+    days: await Promise.all(days.map(async (day) => {
+      const exercises = await database.prepare(`
         SELECT * FROM workout_exercises
         WHERE workout_day_id = ? ORDER BY position ASC, id ASC
       `).all(day.id as number) as unknown as Record<string, unknown>[];
@@ -1265,7 +1310,7 @@ function readWorkoutPlan(database: Database, userId: number, redactNotes = false
           notes: redactNotes || exercise.notes == null ? null : String(exercise.notes),
         })),
       };
-    }),
+    })),
   };
 }
 
@@ -1292,21 +1337,21 @@ function registerWorkoutPlanRoutes(app: Express, database: Database): void {
     return parsed.data;
   };
 
-  app.get('/api/workout-plan', (_request, response) => {
+  app.get('/api/workout-plan', async (_request, response) => {
     const auth = getAuth(response);
-    sendData(response, readWorkoutPlan(database, auth.user.id));
+    sendData(response, await readWorkoutPlan(database, auth.user.id));
   });
 
-  app.put('/api/workout-plan/:dayOfWeek', (request, response) => {
+  app.put('/api/workout-plan/:dayOfWeek', async (request, response) => {
     const auth = getAuth(response);
     const dayOfWeek = parseDayOfWeek(request.params.dayOfWeek);
     const input = daySchema.parse(request.body);
-    seedUserPlans(database, auth.user.id);
+    await seedUserPlans(database, auth.user.id);
     const exercises = input.isRest ? [] : input.exercises;
     const timestamp = now();
 
-    runTransaction(database, () => {
-      database.prepare(`
+    await runTransaction(database, async () => {
+      await database.prepare(`
         UPDATE workout_days
         SET name = ?, is_rest = ?, notes = ?, updated_at = ?
         WHERE user_id = ? AND day_of_week = ?
@@ -1318,17 +1363,13 @@ function registerWorkoutPlanRoutes(app: Express, database: Database): void {
         auth.user.id,
         dayOfWeek,
       );
-      const day = database.prepare(`
+      const day = await database.prepare(`
         SELECT id FROM workout_days WHERE user_id = ? AND day_of_week = ?
       `).get(auth.user.id, dayOfWeek) as unknown as { id: number };
-      database.prepare('DELETE FROM workout_exercises WHERE workout_day_id = ?').run(day.id);
-      const insertExercise = database.prepare(`
-        INSERT INTO workout_exercises (
-          workout_day_id, position, name, sets, reps, notes, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `);
-      exercises.forEach((exercise, position) => {
-        insertExercise.run(
+      await database.prepare('DELETE FROM workout_exercises WHERE workout_day_id = ?').run(day.id);
+      if (exercises.length > 0) {
+        const placeholders = exercises.map(() => '(?, ?, ?, ?, ?, ?, ?, ?)').join(', ');
+        const values = exercises.flatMap((exercise, position) => [
           day.id,
           position,
           exercise.name,
@@ -1337,9 +1378,14 @@ function registerWorkoutPlanRoutes(app: Express, database: Database): void {
           exercise.notes?.trim() || null,
           timestamp,
           timestamp,
-        );
-      });
-      writeAudit(database, {
+        ]);
+        await database.prepare(`
+          INSERT INTO workout_exercises (
+            workout_day_id, position, name, sets, reps, notes, created_at, updated_at
+          ) VALUES ${placeholders}
+        `).run(...values);
+      }
+      await writeAudit(database, {
         actorUserId: auth.user.id,
         action: 'workout.day_updated',
         targetType: 'workout_day',
@@ -1348,19 +1394,19 @@ function registerWorkoutPlanRoutes(app: Express, database: Database): void {
       });
     });
 
-    const plan = readWorkoutPlan(database, auth.user.id);
+    const plan = await readWorkoutPlan(database, auth.user.id);
     sendData(response, { day: plan.days.find((day) => day.dayOfWeek === dayOfWeek) });
   });
 }
 
-function readMealPlan(database: Database, userId: number, redactDescriptions = false) {
-  seedUserPlans(database, userId);
-  const settingsRow = database.prepare(`
+async function readMealPlan(database: Database, userId: number, redactDescriptions = false) {
+  await seedUserPlans(database, userId);
+  const settingsRow = await database.prepare(`
     SELECT * FROM meal_plan_settings WHERE user_id = ?
   `).get(userId) as unknown as Record<string, unknown>;
   const showCalories = Boolean(settingsRow.show_calories);
   const showMacros = Boolean(settingsRow.show_macros);
-  const mealRows = database.prepare(`
+  const mealRows = await database.prepare(`
     SELECT * FROM meals WHERE user_id = ? ORDER BY day_of_week ASC, sort_order ASC, id ASC
   `).all(userId) as unknown as Record<string, unknown>[];
   const mapNullableNumber = (value: unknown) => value == null ? null : Number(value);
@@ -1434,18 +1480,18 @@ function registerMealPlanRoutes(app: Express, database: Database): void {
     sortOrder: mealFields.sortOrder,
   }).strict().refine((value) => Object.keys(value).length > 0, 'At least one field is required');
 
-  app.get('/api/meal-plan', (_request, response) => {
+  app.get('/api/meal-plan', async (_request, response) => {
     const auth = getAuth(response);
-    sendData(response, readMealPlan(database, auth.user.id));
+    sendData(response, await readMealPlan(database, auth.user.id));
   });
 
-  app.put('/api/meal-plan/settings', (request, response) => {
+  app.put('/api/meal-plan/settings', async (request, response) => {
     const auth = getAuth(response);
     const input = settingsSchema.parse(request.body);
-    seedUserPlans(database, auth.user.id);
-    const current = database.prepare('SELECT * FROM meal_plan_settings WHERE user_id = ?')
+    await seedUserPlans(database, auth.user.id);
+    const current = await database.prepare('SELECT * FROM meal_plan_settings WHERE user_id = ?')
       .get(auth.user.id) as unknown as Record<string, unknown>;
-    database.prepare(`
+    await database.prepare(`
       UPDATE meal_plan_settings
       SET show_calories = ?, show_macros = ?, calorie_target = ?, protein_target = ?,
           carbs_target = ?, fat_target = ?, updated_at = ?
@@ -1460,28 +1506,30 @@ function registerMealPlanRoutes(app: Express, database: Database): void {
       now(),
       auth.user.id,
     );
-    writeAudit(database, {
+    await writeAudit(database, {
       actorUserId: auth.user.id,
       action: 'meal.settings_updated',
       targetType: 'meal_plan',
       targetId: auth.user.id,
       ipAddress: requestIp(request),
     });
-    sendData(response, { settings: readMealPlan(database, auth.user.id).settings });
+    sendData(response, { settings: (await readMealPlan(database, auth.user.id)).settings });
   });
 
-  app.post('/api/meal-plan/meals', (request, response) => {
+  app.post('/api/meal-plan/meals', async (request, response) => {
     const auth = getAuth(response);
     const input = createMealSchema.parse(request.body);
-    seedUserPlans(database, auth.user.id);
+    await seedUserPlans(database, auth.user.id);
     const timestamp = now();
-    const result = database.prepare(`
+    const result = await database.prepare(`
       INSERT INTO meals (
         user_id, day_of_week, name, description, calories, protein, carbs, fat,
         sort_order, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      )
+      SELECT users.id, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+      FROM users
+      WHERE users.id = ? AND users.is_active = 1
     `).run(
-      auth.user.id,
       input.dayOfWeek,
       input.name,
       input.description?.trim() || null,
@@ -1492,27 +1540,30 @@ function registerMealPlanRoutes(app: Express, database: Database): void {
       input.sortOrder ?? 0,
       timestamp,
       timestamp,
+      auth.user.id,
     );
+    if (result.changes === 0) throw new HttpError(401, 'AUTH_REQUIRED', 'You must be signed in');
     const id = Number(result.lastInsertRowid);
-    writeAudit(database, {
+    await writeAudit(database, {
       actorUserId: auth.user.id,
       action: 'meal.created',
       targetType: 'meal',
       targetId: id,
       ipAddress: requestIp(request),
     });
-    const meal = readMealPlan(database, auth.user.id).days.flatMap((day) => day.meals).find((item) => item.id === id);
+    const meal = (await readMealPlan(database, auth.user.id)).days
+      .flatMap((day) => day.meals).find((item) => item.id === id);
     sendData(response, { meal }, 201);
   });
 
-  app.patch('/api/meal-plan/meals/:mealId', (request, response) => {
+  app.patch('/api/meal-plan/meals/:mealId', async (request, response) => {
     const auth = getAuth(response);
     const mealId = parseId(request.params.mealId);
     const input = updateMealSchema.parse(request.body);
-    const current = database.prepare('SELECT * FROM meals WHERE id = ? AND user_id = ?')
+    const current = await database.prepare('SELECT * FROM meals WHERE id = ? AND user_id = ?')
       .get(mealId, auth.user.id) as unknown as Record<string, unknown> | undefined;
     if (!current) throw new HttpError(404, 'MEAL_NOT_FOUND', 'Meal not found');
-    database.prepare(`
+    await database.prepare(`
       UPDATE meals SET day_of_week = ?, name = ?, description = ?, calories = ?, protein = ?,
         carbs = ?, fat = ?, sort_order = ?, updated_at = ?
       WHERE id = ? AND user_id = ?
@@ -1529,23 +1580,24 @@ function registerMealPlanRoutes(app: Express, database: Database): void {
       mealId,
       auth.user.id,
     );
-    writeAudit(database, {
+    await writeAudit(database, {
       actorUserId: auth.user.id,
       action: 'meal.updated',
       targetType: 'meal',
       targetId: mealId,
       ipAddress: requestIp(request),
     });
-    const meal = readMealPlan(database, auth.user.id).days.flatMap((day) => day.meals).find((item) => item.id === mealId);
+    const meal = (await readMealPlan(database, auth.user.id)).days
+      .flatMap((day) => day.meals).find((item) => item.id === mealId);
     sendData(response, { meal });
   });
 
-  app.delete('/api/meal-plan/meals/:mealId', (request, response) => {
+  app.delete('/api/meal-plan/meals/:mealId', async (request, response) => {
     const auth = getAuth(response);
     const mealId = parseId(request.params.mealId);
-    const result = database.prepare('DELETE FROM meals WHERE id = ? AND user_id = ?').run(mealId, auth.user.id);
+    const result = await database.prepare('DELETE FROM meals WHERE id = ? AND user_id = ?').run(mealId, auth.user.id);
     if (Number(result.changes) === 0) throw new HttpError(404, 'MEAL_NOT_FOUND', 'Meal not found');
-    writeAudit(database, {
+    await writeAudit(database, {
       actorUserId: auth.user.id,
       action: 'meal.deleted',
       targetType: 'meal',
@@ -1603,16 +1655,16 @@ function registerSharingRoutes(app: Express, database: Database): void {
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
   });
-  const getOwnedShare = (shareId: number, ownerUserId: number) => {
-    const row = database.prepare(`${shareSelect} WHERE sp.id = ? AND sp.owner_user_id = ?`)
+  const getOwnedShare = async (shareId: number, ownerUserId: number) => {
+    const row = await database.prepare(`${shareSelect} WHERE sp.id = ? AND sp.owner_user_id = ?`)
       .get(shareId, ownerUserId) as unknown as Record<string, unknown> | undefined;
     if (!row) throw new HttpError(404, 'SHARE_NOT_FOUND', 'Sharing permission not found');
     return mapShare(row);
   };
 
-  app.get('/api/sharing', (_request, response) => {
+  app.get('/api/sharing', async (_request, response) => {
     const auth = getAuth(response);
-    const availableUsers = database.prepare(`
+    const availableUsers = await database.prepare(`
       SELECT u.id, u.username FROM users u
       WHERE u.id != ? AND u.is_active = 1 AND u.requires_password_setup = 0
         AND NOT EXISTS (
@@ -1621,9 +1673,9 @@ function registerSharingRoutes(app: Express, database: Database): void {
         )
       ORDER BY u.username COLLATE NOCASE
     `).all(auth.user.id, auth.user.id) as unknown as Array<{ id: number; username: string }>;
-    const outgoing = database.prepare(`${shareSelect} WHERE sp.owner_user_id = ? ORDER BY viewer.username COLLATE NOCASE`)
+    const outgoing = await database.prepare(`${shareSelect} WHERE sp.owner_user_id = ? ORDER BY viewer.username COLLATE NOCASE`)
       .all(auth.user.id) as unknown as Record<string, unknown>[];
-    const incoming = database.prepare(`${shareSelect} WHERE sp.viewer_user_id = ? ORDER BY owner.username COLLATE NOCASE`)
+    const incoming = await database.prepare(`${shareSelect} WHERE sp.viewer_user_id = ? ORDER BY owner.username COLLATE NOCASE`)
       .all(auth.user.id) as unknown as Record<string, unknown>[];
     sendData(response, {
       availableUsers: availableUsers.map((user) => ({ id: Number(user.id), username: user.username })),
@@ -1632,14 +1684,14 @@ function registerSharingRoutes(app: Express, database: Database): void {
     });
   });
 
-  app.post('/api/sharing', (request, response) => {
+  app.post('/api/sharing', async (request, response) => {
     const auth = getAuth(response);
     const input = createShareSchema.parse(request.body);
     requirePermission(input);
     if (input.viewerUserId === auth.user.id) {
       throw new HttpError(400, 'CANNOT_SHARE_WITH_SELF', 'You cannot share progress with yourself');
     }
-    const viewer = database.prepare(`
+    const viewer = await database.prepare(`
       SELECT id, username FROM users
       WHERE id = ? AND is_active = 1 AND requires_password_setup = 0
     `)
@@ -1648,27 +1700,38 @@ function registerSharingRoutes(app: Express, database: Database): void {
     const timestamp = now();
     let result;
     try {
-      result = database.prepare(`
+      result = await database.prepare(`
         INSERT INTO sharing_permissions (
           owner_user_id, viewer_user_id, can_view_measurements, can_view_lifts,
           can_view_workout, can_view_meals, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        )
+        SELECT owner.id, viewer.id, ?, ?, ?, ?, ?, ?
+        FROM users owner
+        JOIN users viewer
+          ON viewer.id = ? AND viewer.is_active = 1 AND viewer.requires_password_setup = 0
+        WHERE owner.id = ? AND owner.is_active = 1
       `).run(
-        auth.user.id,
-        viewer.id,
         input.shareMeasurements ? 1 : 0,
         input.shareLifts ? 1 : 0,
         input.shareWorkout ? 1 : 0,
         input.shareMeals ? 1 : 0,
         timestamp,
         timestamp,
+        viewer.id,
+        auth.user.id,
       );
     } catch (error) {
       if (sqliteConflict(error)) throw new HttpError(409, 'SHARE_EXISTS', 'Progress is already shared with this user');
       throw error;
     }
+    if (result.changes === 0) {
+      const owner = await database.prepare('SELECT 1 FROM users WHERE id = ? AND is_active = 1')
+        .get(auth.user.id);
+      if (!owner) throw new HttpError(401, 'AUTH_REQUIRED', 'You must be signed in');
+      throw new HttpError(404, 'VIEWER_NOT_FOUND', 'Viewer account not found');
+    }
     const id = Number(result.lastInsertRowid);
-    writeAudit(database, {
+    await writeAudit(database, {
       actorUserId: auth.user.id,
       action: 'sharing.created',
       targetType: 'sharing',
@@ -1676,14 +1739,14 @@ function registerSharingRoutes(app: Express, database: Database): void {
       metadata: { viewerUsername: viewer.username },
       ipAddress: requestIp(request),
     });
-    sendData(response, { share: getOwnedShare(id, auth.user.id) }, 201);
+    sendData(response, { share: await getOwnedShare(id, auth.user.id) }, 201);
   });
 
-  app.patch('/api/sharing/:shareId', (request, response) => {
+  app.patch('/api/sharing/:shareId', async (request, response) => {
     const auth = getAuth(response);
     const shareId = parseId(request.params.shareId);
     const input = updateShareSchema.parse(request.body);
-    const current = getOwnedShare(shareId, auth.user.id);
+    const current = await getOwnedShare(shareId, auth.user.id);
     const nextPermissions = {
       shareMeasurements: input.shareMeasurements ?? current.shareMeasurements,
       shareLifts: input.shareLifts ?? current.shareLifts,
@@ -1691,7 +1754,7 @@ function registerSharingRoutes(app: Express, database: Database): void {
       shareMeals: input.shareMeals ?? current.shareMeals,
     };
     requirePermission(nextPermissions);
-    database.prepare(`
+    await database.prepare(`
       UPDATE sharing_permissions
       SET can_view_measurements = ?, can_view_lifts = ?, can_view_workout = ?,
           can_view_meals = ?, updated_at = ?
@@ -1705,7 +1768,7 @@ function registerSharingRoutes(app: Express, database: Database): void {
       shareId,
       auth.user.id,
     );
-    writeAudit(database, {
+    await writeAudit(database, {
       actorUserId: auth.user.id,
       action: 'sharing.updated',
       targetType: 'sharing',
@@ -1713,16 +1776,16 @@ function registerSharingRoutes(app: Express, database: Database): void {
       metadata: { viewerUsername: current.viewer.username },
       ipAddress: requestIp(request),
     });
-    sendData(response, { share: getOwnedShare(shareId, auth.user.id) });
+    sendData(response, { share: await getOwnedShare(shareId, auth.user.id) });
   });
 
-  app.delete('/api/sharing/:shareId', (request, response) => {
+  app.delete('/api/sharing/:shareId', async (request, response) => {
     const auth = getAuth(response);
     const shareId = parseId(request.params.shareId);
-    const current = getOwnedShare(shareId, auth.user.id);
-    database.prepare('DELETE FROM sharing_permissions WHERE id = ? AND owner_user_id = ?')
+    const current = await getOwnedShare(shareId, auth.user.id);
+    await database.prepare('DELETE FROM sharing_permissions WHERE id = ? AND owner_user_id = ?')
       .run(shareId, auth.user.id);
-    writeAudit(database, {
+    await writeAudit(database, {
       actorUserId: auth.user.id,
       action: 'sharing.deleted',
       targetType: 'sharing',
@@ -1733,10 +1796,10 @@ function registerSharingRoutes(app: Express, database: Database): void {
     sendData(response, { success: true });
   });
 
-  app.get('/api/shared/:ownerUserId', (request, response) => {
+  app.get('/api/shared/:ownerUserId', async (request, response) => {
     const auth = getAuth(response);
     const ownerUserId = parseId(request.params.ownerUserId);
-    const row = database.prepare(`
+    const row = await database.prepare(`
       SELECT sp.*, owner.username AS owner_username
       FROM sharing_permissions sp
       JOIN users owner ON owner.id = sp.owner_user_id
@@ -1752,20 +1815,20 @@ function registerSharingRoutes(app: Express, database: Database): void {
     sendData(response, {
       owner: { id: ownerUserId, username: String(row.owner_username) },
       permissions,
-      ...(permissions.shareMeasurements ? { measurements: readSharedMeasurements(database, ownerUserId) } : {}),
-      ...(permissions.shareLifts ? { lifts: readSharedLifts(database, ownerUserId) } : {}),
-      ...(permissions.shareWorkout ? { workoutPlan: readWorkoutPlan(database, ownerUserId, true) } : {}),
-      ...(permissions.shareMeals ? { mealPlan: readMealPlan(database, ownerUserId, true) } : {}),
+      ...(permissions.shareMeasurements ? { measurements: await readSharedMeasurements(database, ownerUserId) } : {}),
+      ...(permissions.shareLifts ? { lifts: await readSharedLifts(database, ownerUserId) } : {}),
+      ...(permissions.shareWorkout ? { workoutPlan: await readWorkoutPlan(database, ownerUserId, true) } : {}),
+      ...(permissions.shareMeals ? { mealPlan: await readMealPlan(database, ownerUserId, true) } : {}),
     });
   });
 }
 
-function readSharedMeasurements(database: Database, ownerUserId: number) {
-  const parts = database.prepare(`
+async function readSharedMeasurements(database: Database, ownerUserId: number) {
+  const parts = await database.prepare(`
     SELECT * FROM body_parts WHERE user_id = ? ORDER BY sort_order ASC, id ASC
   `).all(ownerUserId) as unknown as Record<string, unknown>[];
-  return parts.map((part) => {
-    const records = database.prepare(`
+  return Promise.all(parts.map(async (part) => {
+    const records = await database.prepare(`
       SELECT * FROM measurements WHERE body_part_id = ? ORDER BY recorded_at ASC, id ASC
     `).all(part.id as number) as unknown as Record<string, unknown>[];
     const latest = records.at(-1);
@@ -1792,15 +1855,15 @@ function readSharedMeasurements(database: Database, ownerUserId: number) {
         updatedAt: String(record.updated_at),
       })),
     };
-  });
+  }));
 }
 
-function readSharedLifts(database: Database, ownerUserId: number) {
-  const exercises = database.prepare(`
+async function readSharedLifts(database: Database, ownerUserId: number) {
+  const exercises = await database.prepare(`
     SELECT * FROM exercises WHERE user_id = ? ORDER BY sort_order ASC, id ASC
   `).all(ownerUserId) as unknown as Record<string, unknown>[];
-  return exercises.map((exercise) => {
-    const records = database.prepare(`
+  return Promise.all(exercises.map(async (exercise) => {
+    const records = await database.prepare(`
       SELECT * FROM lift_records WHERE exercise_id = ? ORDER BY recorded_at ASC, id ASC
     `).all(exercise.id as number) as unknown as Record<string, unknown>[];
     const latest = records.at(-1);
@@ -1835,7 +1898,7 @@ function readSharedLifts(database: Database, ownerUserId: number) {
         updatedAt: String(record.updated_at),
       })),
     };
-  });
+  }));
 }
 
 function registerAdminRoutes(app: Express, database: Database): void {
@@ -1873,22 +1936,22 @@ function registerAdminRoutes(app: Express, database: Database): void {
     };
   };
 
-  const fetchUser = (userId: number): UserRow => {
-    const row = database.prepare('SELECT * FROM users WHERE id = ?').get(userId) as unknown as UserRow | undefined;
+  const fetchUser = async (userId: number): Promise<UserRow> => {
+    const row = await database.prepare('SELECT * FROM users WHERE id = ?').get(userId) as unknown as UserRow | undefined;
     if (!row) throw new HttpError(404, 'USER_NOT_FOUND', 'User not found');
     return row;
   };
 
-  const countOtherActiveAdmins = (userId: number): number => {
-    const row = database.prepare(`
+  const countOtherActiveAdmins = async (userId: number): Promise<number> => {
+    const row = await database.prepare(`
       SELECT COUNT(*) AS count FROM users WHERE role = 'admin' AND is_active = 1 AND id != ?
     `).get(userId) as unknown as { count: number };
     return Number(row.count);
   };
 
-  app.get('/api/admin/overview', (_request, response) => {
+  app.get('/api/admin/overview', async (_request, response) => {
     getAdmin(response);
-    const userStats = database.prepare(`
+    const userStats = await database.prepare(`
       SELECT
         COUNT(*) AS total,
         SUM(CASE WHEN is_active = 1 AND requires_password_setup = 0 THEN 1 ELSE 0 END) AS active,
@@ -1897,7 +1960,7 @@ function registerAdminRoutes(app: Express, database: Database): void {
         SUM(CASE WHEN role = 'admin' THEN 1 ELSE 0 END) AS admins
       FROM users
     `).get() as unknown as { total: number; active: number; pending: number; disabled: number; admins: number };
-    const recordStats = database.prepare(`
+    const recordStats = await database.prepare(`
       SELECT
         (SELECT COUNT(*) FROM body_parts) AS body_parts,
         (SELECT COUNT(*) FROM measurements) AS measurements,
@@ -1905,7 +1968,7 @@ function registerAdminRoutes(app: Express, database: Database): void {
         (SELECT COUNT(*) FROM lift_records) AS lifts,
         (SELECT COUNT(*) FROM sessions WHERE expires_at > ?) AS active_sessions
     `).get(now()) as unknown as Record<string, number>;
-    const recentRows = database.prepare(`
+    const recentRows = await database.prepare(`
       SELECT * FROM audit_log ORDER BY created_at DESC, id DESC LIMIT 10
     `).all() as unknown as Record<string, unknown>[];
 
@@ -1928,9 +1991,9 @@ function registerAdminRoutes(app: Express, database: Database): void {
     });
   });
 
-  app.get('/api/admin/users', (_request, response) => {
+  app.get('/api/admin/users', async (_request, response) => {
     getAdmin(response);
-    const rows = database.prepare(`
+    const rows = await database.prepare(`
       SELECT u.*,
         (SELECT COUNT(*) FROM body_parts bp WHERE bp.user_id = u.id) AS body_part_count,
         (SELECT COUNT(*) FROM measurements m JOIN body_parts bp ON bp.id = m.body_part_id WHERE bp.user_id = u.id) AS measurement_count,
@@ -1941,23 +2004,23 @@ function registerAdminRoutes(app: Express, database: Database): void {
     sendData(response, { users: rows.map(mapAdminUser) });
   });
 
-  app.post('/api/admin/users', (request, response) => {
+  app.post('/api/admin/users', async (request, response) => {
     const auth = getAdmin(response);
     const input = createUserSchema.parse(request.body);
     const invite = createInviteCode();
     const timestamp = now();
     let userId: number;
     try {
-      userId = runTransaction(database, () => {
-        const result = database.prepare(`
+      userId = await runTransaction(database, async () => {
+        const result = await database.prepare(`
           INSERT INTO users (
             username, password_hash, role, is_active, requires_password_setup,
             invite_code_hash, created_at, updated_at
           ) VALUES (?, '', ?, 1, 1, ?, ?, ?)
         `).run(input.username, input.role, invite.inviteCodeHash, timestamp, timestamp);
         const id = Number(result.lastInsertRowid);
-        seedUserDefaults(database, id);
-        writeAudit(database, {
+        await seedUserDefaults(database, id);
+        await writeAudit(database, {
           actorUserId: auth.user.id,
           action: 'admin.user_created',
           targetType: 'user',
@@ -1971,27 +2034,32 @@ function registerAdminRoutes(app: Express, database: Database): void {
       if (sqliteConflict(error)) throw new HttpError(409, 'USERNAME_EXISTS', 'That username is already in use');
       throw error;
     }
-    sendData(response, { user: publicUser(fetchUser(userId)), inviteCode: invite.inviteCode }, 201);
+    sendData(response, { user: publicUser(await fetchUser(userId)), inviteCode: invite.inviteCode }, 201);
   });
 
-  app.patch('/api/admin/users/:userId/status', (request, response) => {
+  app.patch('/api/admin/users/:userId/status', async (request, response) => {
     const auth = getAdmin(response);
     const userId = parseId(request.params.userId);
     const { isActive } = statusSchema.parse(request.body);
-    const target = fetchUser(userId);
 
     if (userId === auth.user.id && !isActive) {
       throw new HttpError(400, 'CANNOT_DISABLE_SELF', 'You cannot disable your own account');
     }
-    if (target.role === 'admin' && target.is_active && !isActive && countOtherActiveAdmins(userId) === 0) {
-      throw new HttpError(409, 'LAST_ACTIVE_ADMIN', 'The last active administrator cannot be disabled');
-    }
 
-    runTransaction(database, () => {
-      database.prepare('UPDATE users SET is_active = ?, updated_at = ? WHERE id = ?')
+    await runTransaction(database, async () => {
+      const target = await fetchUser(userId);
+      if (
+        target.role === 'admin'
+        && target.is_active
+        && !isActive
+        && await countOtherActiveAdmins(userId) === 0
+      ) {
+        throw new HttpError(409, 'LAST_ACTIVE_ADMIN', 'The last active administrator cannot be disabled');
+      }
+      await database.prepare('UPDATE users SET is_active = ?, updated_at = ? WHERE id = ?')
         .run(isActive ? 1 : 0, now(), userId);
-      if (!isActive) database.prepare('DELETE FROM sessions WHERE user_id = ?').run(userId);
-      writeAudit(database, {
+      if (!isActive) await database.prepare('DELETE FROM sessions WHERE user_id = ?').run(userId);
+      await writeAudit(database, {
         actorUserId: auth.user.id,
         action: isActive ? 'admin.user_activated' : 'admin.user_disabled',
         targetType: 'user',
@@ -2000,26 +2068,26 @@ function registerAdminRoutes(app: Express, database: Database): void {
         ipAddress: requestIp(request),
       });
     });
-    sendData(response, { user: publicUser(fetchUser(userId)) });
+    sendData(response, { user: publicUser(await fetchUser(userId)) });
   });
 
-  app.post('/api/admin/users/:userId/reset-invite', (request, response) => {
+  app.post('/api/admin/users/:userId/reset-invite', async (request, response) => {
     const auth = getAdmin(response);
     const userId = parseId(request.params.userId);
-    const target = fetchUser(userId);
+    const target = await fetchUser(userId);
     if (userId === auth.user.id) {
       throw new HttpError(400, 'CANNOT_RESET_SELF', 'You cannot reset your own account invitation');
     }
     const invite = createInviteCode();
-    runTransaction(database, () => {
-      database.prepare(`
+    await runTransaction(database, async () => {
+      await database.prepare(`
         UPDATE users
         SET password_hash = '', is_active = 1, requires_password_setup = 1,
             invite_code_hash = ?, updated_at = ?
         WHERE id = ?
       `).run(invite.inviteCodeHash, now(), userId);
-      database.prepare('DELETE FROM sessions WHERE user_id = ?').run(userId);
-      writeAudit(database, {
+      await database.prepare('DELETE FROM sessions WHERE user_id = ?').run(userId);
+      await writeAudit(database, {
         actorUserId: auth.user.id,
         action: 'admin.invite_reset',
         targetType: 'user',
@@ -2028,22 +2096,22 @@ function registerAdminRoutes(app: Express, database: Database): void {
         ipAddress: requestIp(request),
       });
     });
-    sendData(response, { user: publicUser(fetchUser(userId)), inviteCode: invite.inviteCode });
+    sendData(response, { user: publicUser(await fetchUser(userId)), inviteCode: invite.inviteCode });
   });
 
-  app.delete('/api/admin/users/:userId', (request, response) => {
+  app.delete('/api/admin/users/:userId', async (request, response) => {
     const auth = getAdmin(response);
     const userId = parseId(request.params.userId);
-    const target = fetchUser(userId);
     if (userId === auth.user.id) {
       throw new HttpError(400, 'CANNOT_DELETE_SELF', 'You cannot delete your own account');
     }
-    if (target.role === 'admin' && countOtherActiveAdmins(userId) === 0) {
-      throw new HttpError(409, 'LAST_ACTIVE_ADMIN', 'The last active administrator cannot be deleted');
-    }
 
-    runTransaction(database, () => {
-      writeAudit(database, {
+    await runTransaction(database, async () => {
+      const target = await fetchUser(userId);
+      if (target.role === 'admin' && await countOtherActiveAdmins(userId) === 0) {
+        throw new HttpError(409, 'LAST_ACTIVE_ADMIN', 'The last active administrator cannot be deleted');
+      }
+      await writeAudit(database, {
         actorUserId: auth.user.id,
         action: 'admin.user_deleted',
         targetType: 'user',
@@ -2051,16 +2119,40 @@ function registerAdminRoutes(app: Express, database: Database): void {
         metadata: { username: target.username, role: target.role },
         ipAddress: requestIp(request),
       });
-      database.prepare('DELETE FROM users WHERE id = ?').run(userId);
+      // Turso documents foreign-key enforcement as connection-scoped and off by
+      // default, so hosted deletes must not rely on ON DELETE CASCADE alone.
+      await database.prepare(`
+        DELETE FROM measurements
+        WHERE body_part_id IN (SELECT id FROM body_parts WHERE user_id = ?)
+      `).run(userId);
+      await database.prepare('DELETE FROM body_parts WHERE user_id = ?').run(userId);
+      await database.prepare(`
+        DELETE FROM lift_records
+        WHERE exercise_id IN (SELECT id FROM exercises WHERE user_id = ?)
+      `).run(userId);
+      await database.prepare('DELETE FROM exercises WHERE user_id = ?').run(userId);
+      await database.prepare(`
+        DELETE FROM workout_exercises
+        WHERE workout_day_id IN (SELECT id FROM workout_days WHERE user_id = ?)
+      `).run(userId);
+      await database.prepare('DELETE FROM workout_days WHERE user_id = ?').run(userId);
+      await database.prepare('DELETE FROM meals WHERE user_id = ?').run(userId);
+      await database.prepare('DELETE FROM meal_plan_settings WHERE user_id = ?').run(userId);
+      await database.prepare(`
+        DELETE FROM sharing_permissions WHERE owner_user_id = ? OR viewer_user_id = ?
+      `).run(userId, userId);
+      await database.prepare('DELETE FROM sessions WHERE user_id = ?').run(userId);
+      await database.prepare('UPDATE audit_log SET actor_user_id = NULL WHERE actor_user_id = ?').run(userId);
+      await database.prepare('DELETE FROM users WHERE id = ?').run(userId);
     });
     sendData(response, { success: true });
   });
 
-  app.get('/api/admin/audit', (request, response) => {
+  app.get('/api/admin/audit', async (request, response) => {
     getAdmin(response);
     const { limit, offset } = auditQuerySchema.parse(request.query);
-    const count = database.prepare('SELECT COUNT(*) AS count FROM audit_log').get() as unknown as { count: number };
-    const rows = database.prepare(`
+    const count = await database.prepare('SELECT COUNT(*) AS count FROM audit_log').get() as unknown as { count: number };
+    const rows = await database.prepare(`
       SELECT * FROM audit_log ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?
     `).all(limit, offset) as unknown as Record<string, unknown>[];
     sendData(response, {
@@ -2071,17 +2163,17 @@ function registerAdminRoutes(app: Express, database: Database): void {
 }
 
 function registerExportRoute(app: Express, database: Database): void {
-  app.get('/api/export', (_request, response) => {
+  app.get('/api/export', async (_request, response) => {
     const auth = getAuth(response);
-    const bodyPartRows = database.prepare(`
+    const bodyPartRows = await database.prepare(`
       SELECT * FROM body_parts WHERE user_id = ? ORDER BY sort_order ASC, id ASC
     `).all(auth.user.id) as unknown as Record<string, unknown>[];
-    const exerciseRows = database.prepare(`
+    const exerciseRows = await database.prepare(`
       SELECT * FROM exercises WHERE user_id = ? ORDER BY sort_order ASC, id ASC
     `).all(auth.user.id) as unknown as Record<string, unknown>[];
 
-    const bodyParts = bodyPartRows.map((part) => {
-      const measurements = database.prepare(`
+    const bodyParts = await Promise.all(bodyPartRows.map(async (part) => {
+      const measurements = await database.prepare(`
         SELECT id, value, recorded_at, note, created_at, updated_at
         FROM measurements WHERE body_part_id = ? ORDER BY recorded_at ASC, id ASC
       `).all(part.id as number) as unknown as Record<string, unknown>[];
@@ -2102,10 +2194,10 @@ function registerExportRoute(app: Express, database: Database): void {
           updatedAt: String(measurement.updated_at),
         })),
       };
-    });
+    }));
 
-    const exercises = exerciseRows.map((exercise) => {
-      const lifts = database.prepare(`
+    const exercises = await Promise.all(exerciseRows.map(async (exercise) => {
+      const lifts = await database.prepare(`
         SELECT id, weight, reps, recorded_at, note, created_at, updated_at
         FROM lift_records WHERE exercise_id = ? ORDER BY recorded_at ASC, id ASC
       `).all(exercise.id as number) as unknown as Record<string, unknown>[];
@@ -2128,9 +2220,9 @@ function registerExportRoute(app: Express, database: Database): void {
           updatedAt: String(lift.updated_at),
         })),
       };
-    });
+    }));
 
-    const shareRows = database.prepare(`
+    const shareRows = await database.prepare(`
       SELECT sp.*,
         owner.id AS owner_id, owner.username AS owner_username,
         viewer.id AS viewer_id, viewer.username AS viewer_username
@@ -2159,8 +2251,8 @@ function registerExportRoute(app: Express, database: Database): void {
       user: auth.user,
       bodyParts,
       exercises,
-      workoutPlan: readWorkoutPlan(database, auth.user.id),
-      mealPlan: readMealPlan(database, auth.user.id),
+      workoutPlan: await readWorkoutPlan(database, auth.user.id),
+      mealPlan: await readMealPlan(database, auth.user.id),
       sharing: {
         outgoingShares: shareRows.filter((share) => Number(share.owner_user_id) === auth.user.id).map(mapShare),
         incomingShares: shareRows.filter((share) => Number(share.viewer_user_id) === auth.user.id).map(mapShare),

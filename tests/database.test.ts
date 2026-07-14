@@ -8,54 +8,66 @@ import {
   openDatabase,
   runTransaction,
   seedUserDefaults,
+  seedUserPlans,
+  writeAudit,
   type Database,
 } from '../server/db.js';
 
 let database: Database | undefined;
 let temporaryDirectory: string | undefined;
 
-function openTemporaryDatabase(): Database {
-  temporaryDirectory = mkdtempSync(join(tmpdir(), 'forge-test-'));
-  database = openDatabase(join(temporaryDirectory, 'forge.db'));
+async function openTemporaryDatabase(): Promise<Database> {
+  database = await openDatabase(':memory:');
   return database;
 }
 
-function insertUser(db: Database, username: string, role: 'user' | 'admin' = 'user'): number {
+async function insertUser(db: Database, username: string, role: 'user' | 'admin' = 'user'): Promise<number> {
   const now = new Date().toISOString();
-  return Number(
-    db.prepare(`
-      INSERT INTO users (username, password_hash, role, is_active, created_at, updated_at)
-      VALUES (?, ?, ?, 1, ?, ?)
-    `).run(username, 'test-only-hash', role, now, now).lastInsertRowid,
-  );
+  const result = await db.prepare(`
+    INSERT INTO users (username, password_hash, role, is_active, created_at, updated_at)
+    VALUES (?, ?, ?, 1, ?, ?)
+  `).run(username, 'test-only-hash', role, now, now);
+  return Number(result.lastInsertRowid);
 }
 
-afterEach(() => {
-  database?.close();
+afterEach(async () => {
+  if (database) await database.close();
   database = undefined;
-  if (temporaryDirectory) rmSync(temporaryDirectory, { recursive: true, force: true });
+  if (temporaryDirectory) {
+    try {
+      rmSync(temporaryDirectory, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (process.platform !== 'win32' || code !== 'EPERM') throw error;
+    }
+  }
   temporaryDirectory = undefined;
 });
 
 describe('database initialization', () => {
-  it('creates an isolated SQLite database and enables foreign-key enforcement', () => {
-    const db = openTemporaryDatabase();
+  it('requires an authentication token for remote Turso databases', async () => {
+    await expect(openDatabase({ url: 'libsql://forge-example.turso.io' }))
+      .rejects.toThrow('TURSO_AUTH_TOKEN is required');
+  });
 
-    expect(db.prepare('PRAGMA foreign_keys').get()).toEqual({ foreign_keys: 1 });
-    expect(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'users'").get())
+  it('creates an isolated SQLite database and enables foreign-key enforcement', async () => {
+    const db = await openTemporaryDatabase();
+
+    expect(await db.prepare('PRAGMA foreign_keys').get()).toEqual({ foreign_keys: 1 });
+    expect(await db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'users'").get())
       .toEqual({ name: 'users' });
   });
 
-  it('seeds each user with their own defaults and remains idempotent', () => {
-    const db = openTemporaryDatabase();
-    const ownerId = insertUser(db, 'Owner');
-    const memberId = insertUser(db, 'Member');
+  it('seeds each user with their own defaults and remains idempotent', async () => {
+    const db = await openTemporaryDatabase();
+    const ownerId = await insertUser(db, 'Owner');
+    const memberId = await insertUser(db, 'Member');
 
-    seedUserDefaults(db, ownerId);
-    seedUserDefaults(db, ownerId);
-    seedUserDefaults(db, memberId);
+    await seedUserDefaults(db, ownerId);
+    await seedUserDefaults(db, ownerId);
+    await seedUserDefaults(db, memberId);
 
-    const counts = db.prepare(`
+    const counts = await db.prepare(`
       SELECT user_id, COUNT(*) AS count
       FROM body_parts
       GROUP BY user_id
@@ -66,10 +78,10 @@ describe('database initialization', () => {
       { user_id: memberId, count: 9 },
     ]);
 
-    const ownerBench = db.prepare(
+    const ownerBench = await db.prepare(
       "SELECT id FROM exercises WHERE user_id = ? AND name = 'Bench Press'",
     ).get(ownerId);
-    const memberBench = db.prepare(
+    const memberBench = await db.prepare(
       "SELECT id FROM exercises WHERE user_id = ? AND name = 'Bench Press'",
     ).get(memberId);
     expect(ownerBench).toBeTruthy();
@@ -77,44 +89,86 @@ describe('database initialization', () => {
     expect(ownerBench).not.toEqual(memberBench);
   });
 
-  it('rolls back every statement when a transaction fails', () => {
-    const db = openTemporaryDatabase();
+  it('avoids orphaned defaults and audit actors when foreign-key enforcement is unavailable', async () => {
+    const db = await openTemporaryDatabase();
+    await db.prepare('PRAGMA foreign_keys = OFF').run();
 
-    expect(() => runTransaction(db, () => {
-      insertUser(db, 'Should Roll Back');
+    await seedUserDefaults(db, 999_999);
+    await seedUserPlans(db, 999_999);
+    await writeAudit(db, {
+      actorUserId: 999_999,
+      action: 'test.missing_actor',
+      targetType: 'test',
+    });
+
+    expect(await db.prepare('SELECT COUNT(*) AS count FROM body_parts').get()).toEqual({ count: 0 });
+    expect(await db.prepare('SELECT COUNT(*) AS count FROM exercises').get()).toEqual({ count: 0 });
+    expect(await db.prepare('SELECT COUNT(*) AS count FROM workout_days').get()).toEqual({ count: 0 });
+    expect(await db.prepare('SELECT COUNT(*) AS count FROM meal_plan_settings').get()).toEqual({ count: 0 });
+    expect(await db.prepare('SELECT actor_user_id, actor_username FROM audit_log').get())
+      .toEqual({ actor_user_id: null, actor_username: null });
+  });
+
+  it('rolls back every statement when a transaction fails', async () => {
+    const db = await openTemporaryDatabase();
+
+    await expect(runTransaction(db, async () => {
+      await insertUser(db, 'Should Roll Back');
       throw new Error('stop');
-    })).toThrow('stop');
+    })).rejects.toThrow('stop');
 
-    expect(db.prepare("SELECT id FROM users WHERE username = 'Should Roll Back'").get())
+    expect(await db.prepare("SELECT id FROM users WHERE username = 'Should Roll Back'").get())
       .toBeUndefined();
   });
 
-  it('cascades a deleted user through their private measurement and lift data', () => {
-    const db = openTemporaryDatabase();
-    const userId = insertUser(db, 'Disposable');
-    seedUserDefaults(db, userId);
-    const now = new Date().toISOString();
-    const bodyPart = db.prepare('SELECT id FROM body_parts WHERE user_id = ? LIMIT 1').get(userId) as { id: number };
-    const exercise = db.prepare('SELECT id FROM exercises WHERE user_id = ? LIMIT 1').get(userId) as { id: number };
+  it('serializes concurrent transactions on the local fallback connection', async () => {
+    const db = await openTemporaryDatabase();
+    let signalStarted!: () => void;
+    let releaseFirst!: () => void;
+    const started = new Promise<void>((resolve) => { signalStarted = resolve; });
+    const holdFirst = new Promise<void>((resolve) => { releaseFirst = resolve; });
 
-    db.prepare(`
+    const first = runTransaction(db, async () => {
+      signalStarted();
+      await holdFirst;
+      await insertUser(db, 'First local transaction');
+    });
+    await started;
+    const second = runTransaction(db, async () => {
+      await insertUser(db, 'Second local transaction');
+    });
+    releaseFirst();
+
+    await expect(Promise.all([first, second])).resolves.toEqual([undefined, undefined]);
+    expect(await db.prepare('SELECT COUNT(*) AS count FROM users').get()).toEqual({ count: 2 });
+  });
+
+  it('cascades a deleted user through their private measurement and lift data', async () => {
+    const db = await openTemporaryDatabase();
+    const userId = await insertUser(db, 'Disposable');
+    await seedUserDefaults(db, userId);
+    const now = new Date().toISOString();
+    const bodyPart = await db.prepare('SELECT id FROM body_parts WHERE user_id = ? LIMIT 1').get(userId) as { id: number };
+    const exercise = await db.prepare('SELECT id FROM exercises WHERE user_id = ? LIMIT 1').get(userId) as { id: number };
+
+    await db.prepare(`
       INSERT INTO measurements (body_part_id, value, recorded_at, created_at, updated_at)
       VALUES (?, 80, ?, ?, ?)
     `).run(bodyPart.id, now, now, now);
-    db.prepare(`
+    await db.prepare(`
       INSERT INTO lift_records (exercise_id, weight, reps, recorded_at, created_at, updated_at)
       VALUES (?, 100, 1, ?, ?, ?)
     `).run(exercise.id, now, now, now);
 
-    db.prepare('DELETE FROM users WHERE id = ?').run(userId);
+    await db.prepare('DELETE FROM users WHERE id = ?').run(userId);
 
-    expect(db.prepare('SELECT COUNT(*) AS count FROM measurements').get()).toEqual({ count: 0 });
-    expect(db.prepare('SELECT COUNT(*) AS count FROM lift_records').get()).toEqual({ count: 0 });
-    expect(db.prepare('SELECT COUNT(*) AS count FROM body_parts').get()).toEqual({ count: 0 });
-    expect(db.prepare('SELECT COUNT(*) AS count FROM exercises').get()).toEqual({ count: 0 });
+    expect(await db.prepare('SELECT COUNT(*) AS count FROM measurements').get()).toEqual({ count: 0 });
+    expect(await db.prepare('SELECT COUNT(*) AS count FROM lift_records').get()).toEqual({ count: 0 });
+    expect(await db.prepare('SELECT COUNT(*) AS count FROM body_parts').get()).toEqual({ count: 0 });
+    expect(await db.prepare('SELECT COUNT(*) AS count FROM exercises').get()).toEqual({ count: 0 });
   });
 
-  it('migrates legacy audit logs, snapshots actors, and scrubs private training metadata', () => {
+  it('migrates legacy audit logs, snapshots actors, and scrubs private training metadata', async () => {
     temporaryDirectory = mkdtempSync(join(tmpdir(), 'forge-legacy-test-'));
     const databasePath = join(temporaryDirectory, 'forge.db');
     const legacy = new DatabaseSync(databasePath);
@@ -152,8 +206,8 @@ describe('database initialization', () => {
     `).run(JSON.stringify({ value: 99, note: 'private legacy note' }), timestamp);
     legacy.close();
 
-    database = openDatabase(databasePath);
-    expect(database.prepare(`
+    database = await openDatabase(databasePath);
+    expect(await database.prepare(`
       SELECT actor_username, metadata FROM audit_log WHERE id = 1
     `).get()).toEqual({ actor_username: 'Legacy member', metadata: null });
   });

@@ -1,6 +1,3 @@
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import request from 'supertest';
 
@@ -8,18 +5,15 @@ import { createApp } from '../server/app.js';
 import { openDatabase, type Database } from '../server/db.js';
 
 let database: Database;
-let temporaryDirectory: string;
-let app: ReturnType<typeof createApp>;
+let app: Awaited<ReturnType<typeof createApp>>;
 
-beforeEach(() => {
-  temporaryDirectory = mkdtempSync(join(tmpdir(), 'forge-admin-test-'));
-  database = openDatabase(join(temporaryDirectory, 'forge.db'));
-  app = createApp({ database, cookieSecure: false, serveStatic: false });
+beforeEach(async () => {
+  database = await openDatabase(':memory:');
+  app = await createApp({ database, cookieSecure: false, serveStatic: false });
 });
 
-afterEach(() => {
-  database.close();
-  rmSync(temporaryDirectory, { recursive: true, force: true });
+afterEach(async () => {
+  await database.close();
 });
 
 async function setupAdmin() {
@@ -75,9 +69,9 @@ describe('admin authorization', () => {
       expect(denial.status).toBe(403);
       expect(denial.body).toMatchObject({ error: { code: 'ADMIN_REQUIRED' } });
     }
-    expect(database.prepare("SELECT COUNT(*) AS count FROM users WHERE username = 'Injected'").get())
+    expect(await database.prepare("SELECT COUNT(*) AS count FROM users WHERE username = 'Injected'").get())
       .toEqual({ count: 0 });
-    expect(database.prepare('SELECT is_active FROM users WHERE id = ?').get(member.id))
+    expect(await database.prepare('SELECT is_active FROM users WHERE id = ?').get(member.id))
       .toEqual({ is_active: 1 });
   });
 
@@ -104,7 +98,7 @@ describe('admin authorization', () => {
       .expect(409);
 
     expect(duplicate.body).toMatchObject({ error: { code: 'USERNAME_EXISTS' } });
-    expect(database.prepare("SELECT COUNT(*) AS count FROM users WHERE username = 'Member'").get())
+    expect(await database.prepare("SELECT COUNT(*) AS count FROM users WHERE username = 'Member'").get())
       .toEqual({ count: 1 });
   });
 
@@ -114,7 +108,7 @@ describe('admin authorization', () => {
       .post('/api/admin/users')
       .send({ username: 'PeerAdmin', role: 'admin' })
       .expect(400);
-    expect(database.prepare("SELECT COUNT(*) AS count FROM users WHERE role = 'admin'").get())
+    expect(await database.prepare("SELECT COUNT(*) AS count FROM users WHERE role = 'admin'").get())
       .toEqual({ count: 1 });
   });
 });
@@ -236,17 +230,17 @@ describe('admin account safeguards', () => {
 
     await admin.delete(`/api/admin/users/${member.id}`).expect(200);
 
-    expect(database.prepare('SELECT id FROM users WHERE id = ?').get(member.id)).toBeUndefined();
-    expect(database.prepare('SELECT COUNT(*) AS count FROM body_parts WHERE user_id = ?').get(member.id))
+    expect(await database.prepare('SELECT id FROM users WHERE id = ?').get(member.id)).toBeUndefined();
+    expect(await database.prepare('SELECT COUNT(*) AS count FROM body_parts WHERE user_id = ?').get(member.id))
       .toEqual({ count: 0 });
-    expect(database.prepare('SELECT COUNT(*) AS count FROM exercises WHERE user_id = ?').get(member.id))
+    expect(await database.prepare('SELECT COUNT(*) AS count FROM exercises WHERE user_id = ?').get(member.id))
       .toEqual({ count: 0 });
-    expect(database.prepare(`
+    expect(await database.prepare(`
       SELECT action, target_id FROM audit_log
       WHERE action = 'admin.user_deleted' AND target_id = ?
     `).get(String(member.id))).toEqual({ action: 'admin.user_deleted', target_id: String(member.id) });
 
-    expect(database.prepare(`
+    expect(await database.prepare(`
       SELECT actor_user_id, actor_username FROM audit_log
       WHERE action = 'auth.login' AND actor_username = 'Disposable'
     `).get()).toEqual({ actor_user_id: null, actor_username: 'Disposable' });
@@ -261,7 +255,7 @@ describe('admin account safeguards', () => {
     );
     expect(trainingEvents.length).toBeGreaterThan(0);
     expect(trainingEvents.every((event: { metadata: unknown }) => event.metadata === null)).toBe(true);
-    expect(database.prepare(`
+    expect(await database.prepare(`
       SELECT COUNT(*) AS count FROM audit_log
       WHERE target_type IN ('body_part', 'measurement', 'exercise', 'lift') AND metadata IS NOT NULL
     `).get()).toEqual({ count: 0 });
@@ -272,7 +266,7 @@ describe('admin audit privacy', () => {
   it('redacts private training metadata defensively in overview and audit responses', async () => {
     const { agent: admin, user: adminUser } = await setupAdmin();
     const timestamp = new Date().toISOString();
-    database.prepare(`
+    await database.prepare(`
       INSERT INTO audit_log (
         actor_user_id, actor_username, action, target_type, target_id, metadata, created_at
       ) VALUES (?, ?, 'measurement.updated', 'measurement', '999', ?, ?)

@@ -18,7 +18,7 @@ The development command starts:
 - the React app at `http://localhost:5173`
 - the API at `http://localhost:3001`
 
-Data is stored locally in `data/forge.db`. That directory is ignored by Git.
+Without Turso environment variables, data is stored locally in `data/forge.db`. That directory is ignored by Git. To exercise the hosted database path locally, copy `.env.example` to `.env` and set both `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN`.
 
 ## Production build
 
@@ -30,18 +30,29 @@ npm start
 
 The server serves the compiled app from `dist/`. It uses the `PORT` environment variable, or port `3001` locally.
 
-Copy `.env.example` to `.env` if you want to change the local database path or session settings. Environment files, database files, password hashes, and session tokens must not be committed.
+Copy `.env.example` to `.env` if you want to change the local database path, connect to Turso, or adjust session settings. Environment files, database files, password hashes, auth tokens, and session tokens must not be committed.
 
 ## Deploy on Render
 
-This repository includes a root `render.yaml` Blueprint. It builds the React client, starts the Node server, checks `/api/health`, enables secure cookies behind Render's proxy, and stores SQLite at `/var/data/forge.db` on a persistent disk. Automatic deploys wait for the linked GitHub checks to pass.
+This repository includes a root `render.yaml` Blueprint for Render's free web-service plan. It builds the React client, starts the Node server, checks `/api/health`, enables secure cookies behind Render's proxy, and keeps application data in Turso instead of Render's temporary filesystem. Automatic deploys wait for the linked GitHub checks to pass.
 
-1. Create a GitHub repository and push this project to it.
-2. In Render, choose **New > Blueprint** and connect the GitHub repository.
-3. Review the Blueprint, then create the `forge-gym-tracker` service.
-4. Open the deployed URL and create the administrator account immediately.
+1. Create a Turso database in the Turso dashboard, then generate a database auth token. With the Turso CLI, the equivalent commands are:
 
-The Blueprint intentionally uses Render's paid `starter` plan because Render does not allow persistent disks on free web services. A free web service would lose the local SQLite database during restarts, redeploys, or spin-downs. Do not remove the disk or change `DATABASE_PATH` away from `/var/data/forge.db` unless you also move Forge to a durable external database.
+   ```bash
+   turso db create forge-gym-tracker
+   turso db show --url forge-gym-tracker
+   turso db tokens create forge-gym-tracker
+   ```
+
+2. Copy the database URL (it begins with `libsql://`) and the token; treat the token like a password.
+3. Create a GitHub repository and push this project to it.
+4. In Render, choose **New > Blueprint** and connect the GitHub repository.
+5. When Render prompts for secret environment values, enter the URL as `TURSO_DATABASE_URL` and the token as `TURSO_AUTH_TOKEN`.
+6. Create the `forge-gym-tracker` service, open its deployed URL, and create the administrator account immediately.
+
+Both Turso values are required in production. The Blueprint marks them as unsynced secrets, so their real values stay in Render rather than Git. Render's free filesystem is ephemeral and must not be used for the production database; Turso provides the durable storage. Local development still falls back to `DATABASE_PATH=./data/forge.db` when the Turso values are absent.
+
+Render's free web service may spin down while inactive, so the first request after a quiet period can be slower. That cold start does not affect progress stored in Turso.
 
 Render supplies `PORT`; it should not be added manually. The service is configured for Node 24 in `.node-version`, `package.json`, and `render.yaml`.
 
@@ -89,4 +100,4 @@ npm start         # run the built application
 
 Admin access is based on the persisted account role and is checked on every admin API route. It is not granted by a client-side username check. Users can only mutate records belonging to their own account. Friend data is exposed only through explicit, read-only sharing grants, with each shared section enforced by the server.
 
-For any internet-facing deployment, keep HTTPS and secure cookies enabled, use a strong administrator password, and back up the persistent SQLite database regularly. The included Render Blueprint sets `COOKIE_SECURE=1` and `TRUST_PROXY=1`; the local `.env.example` keeps secure cookies off so plain HTTP development continues to work.
+For any internet-facing deployment, keep HTTPS and secure cookies enabled, use a strong administrator password, protect and rotate the Turso auth token if it is exposed, and maintain an appropriate backup or export routine for the hosted database. The included Render Blueprint sets `COOKIE_SECURE=1` and `TRUST_PROXY=1`; the local `.env.example` keeps secure cookies off so plain HTTP development continues to work.

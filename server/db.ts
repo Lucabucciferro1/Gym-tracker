@@ -1,8 +1,140 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
+import { pathToFileURL } from 'node:url';
+import {
+  createClient,
+  type Client,
+  type InValue,
+  type ResultSet,
+} from '@libsql/client';
 
-export type Database = DatabaseSync;
+interface SqlExecutor {
+  execute(statement: { sql: string; args: InValue[] }): Promise<ResultSet>;
+  executeMultiple(sql: string): Promise<void>;
+}
+
+export interface RunResult {
+  changes: number;
+  lastInsertRowid: bigint | undefined;
+}
+
+export interface Statement {
+  all(...args: InValue[]): Promise<Array<Record<string, unknown>>>;
+  get(...args: InValue[]): Promise<Record<string, unknown> | undefined>;
+  run(...args: InValue[]): Promise<RunResult>;
+}
+
+function plainRows(result: ResultSet): Array<Record<string, unknown>> {
+  return result.rows.map((row) => Object.fromEntries(
+    result.columns.map((column, index) => [column, row[index]]),
+  ));
+}
+
+export class Database {
+  private readonly transactionContext = new AsyncLocalStorage<SqlExecutor>();
+  private localOperationTail = Promise.resolve();
+
+  constructor(private readonly client: Client) {}
+
+  private async withLocalOperation<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.client.protocol !== 'file' || this.transactionContext.getStore()) {
+      return operation();
+    }
+
+    const previous = this.localOperationTail;
+    let release!: () => void;
+    this.localOperationTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  }
+
+  prepare(sql: string): Statement {
+    const execute = async (args: InValue[]): Promise<ResultSet> => {
+      const executor = this.transactionContext.getStore() ?? this.client;
+      return this.withLocalOperation(() => executor.execute({ sql, args }));
+    };
+
+    return {
+      all: async (...args) => plainRows(await execute(args)),
+      get: async (...args) => plainRows(await execute(args))[0],
+      run: async (...args) => {
+        const result = await execute(args);
+        return {
+          changes: result.rowsAffected,
+          lastInsertRowid: result.lastInsertRowid,
+        };
+      },
+    };
+  }
+
+  async exec(sql: string): Promise<void> {
+    const executor = this.transactionContext.getStore() ?? this.client;
+    await this.withLocalOperation(() => executor.executeMultiple(sql));
+  }
+
+  async transaction<T>(operation: () => Promise<T>): Promise<T> {
+    const activeTransaction = this.transactionContext.getStore();
+    if (activeTransaction) return operation();
+
+    // Keep local and in-memory work on the client's owned connection. The
+    // local-operation queue prevents another request from entering that
+    // connection while this explicit transaction is active.
+    if (this.client.protocol === 'file') {
+      return this.withLocalOperation(async () => {
+        await this.client.execute('BEGIN IMMEDIATE');
+        try {
+          const result = await this.transactionContext.run(this.client, operation);
+          await this.client.execute('COMMIT');
+          return result;
+        } catch (error) {
+          try {
+            await this.client.execute('ROLLBACK');
+          } catch {
+            // Preserve the operation/commit failure if the driver has already
+            // closed the transaction.
+          }
+          throw error;
+        }
+      });
+    }
+
+    const transaction = await this.client.transaction('write');
+    try {
+      const result = await this.transactionContext.run(transaction, operation);
+      await transaction.commit();
+      return result;
+    } catch (error) {
+      if (!transaction.closed) {
+        try {
+          await transaction.rollback();
+        } catch {
+          // Preserve the original operation/commit failure.
+        }
+      }
+      throw error;
+    } finally {
+      if (!transaction.closed) transaction.close();
+    }
+  }
+
+  close(): void {
+    this.transactionContext.disable();
+    this.client.close();
+  }
+}
+
+export interface OpenDatabaseOptions {
+  url?: string;
+  authToken?: string;
+  path?: string;
+}
 
 const DEFAULT_BODY_PARTS = [
   ['Body Weight', 'kg', '#f97316'],
@@ -24,23 +156,43 @@ const DEFAULT_EXERCISES = [
   ['Barbell Row', 'Back', 'kg', '#ef4444'],
 ] as const;
 
-export function openDatabase(databasePath = './data/forge.db'): Database {
-  if (databasePath !== ':memory:') {
-    const absolutePath = resolve(databasePath);
-    mkdirSync(dirname(absolutePath), { recursive: true });
-    databasePath = absolutePath;
+function localDatabaseUrl(databasePath: string): string {
+  if (databasePath === ':memory:') return ':memory:';
+
+  const absolutePath = resolve(databasePath);
+  mkdirSync(dirname(absolutePath), { recursive: true });
+  return pathToFileURL(absolutePath).href;
+}
+
+function normalizeOpenOptions(options: string | OpenDatabaseOptions): Required<Pick<OpenDatabaseOptions, 'url'>> & OpenDatabaseOptions {
+  if (typeof options === 'string') return { url: localDatabaseUrl(options), path: options };
+  if (options.url) return { ...options, url: options.url };
+  const path = options.path ?? './data/forge.db';
+  return { ...options, path, url: localDatabaseUrl(path) };
+}
+
+export async function openDatabase(
+  options: string | OpenDatabaseOptions = { path: './data/forge.db' },
+): Promise<Database> {
+  const { url, authToken } = normalizeOpenOptions(options);
+  const isRemote = !url.startsWith('file:') && url !== ':memory:';
+  if (isRemote && !authToken) {
+    throw new Error('TURSO_AUTH_TOKEN is required when TURSO_DATABASE_URL points to a remote database');
   }
 
-  const database = new DatabaseSync(databasePath);
-  initializeDatabase(database);
+  const database = new Database(createClient({
+    url,
+    ...(authToken ? { authToken } : {}),
+    intMode: 'number',
+    timeout: 5_000,
+  }));
+  await initializeDatabase(database);
   return database;
 }
 
-export function initializeDatabase(database: Database): void {
-  database.exec(`
+export async function initializeDatabase(database: Database): Promise<void> {
+  await database.exec(`
     PRAGMA foreign_keys = ON;
-    PRAGMA journal_mode = WAL;
-    PRAGMA busy_timeout = 5000;
 
     CREATE TABLE IF NOT EXISTS users (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -205,112 +357,137 @@ export function initializeDatabase(database: Database): void {
     CREATE INDEX IF NOT EXISTS idx_meals_user_day ON meals(user_id, day_of_week);
   `);
 
-  const userColumns = database.prepare('PRAGMA table_info(users)').all() as unknown as Array<{ name: string }>;
-  if (!userColumns.some((column) => column.name === 'requires_password_setup')) {
-    database.exec(`
-      ALTER TABLE users ADD COLUMN requires_password_setup INTEGER NOT NULL DEFAULT 0
-        CHECK (requires_password_setup IN (0, 1))
-    `);
-  }
-  if (!userColumns.some((column) => column.name === 'invite_code_hash')) {
-    database.exec('ALTER TABLE users ADD COLUMN invite_code_hash TEXT');
-  }
-  database.exec(`
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_users_invite_code
-      ON users(invite_code_hash) WHERE invite_code_hash IS NOT NULL
-  `);
+  // Keep every legacy table inspection, alteration, and backfill in one write
+  // transaction. This prevents concurrent app starts from observing and acting
+  // on the same partially migrated schema.
+  await database.transaction(async () => {
+    const userColumns = await database.prepare('PRAGMA table_info(users)').all() as unknown as Array<{ name: string }>;
+    if (!userColumns.some((column) => column.name === 'requires_password_setup')) {
+      await database.prepare(`
+        ALTER TABLE users ADD COLUMN requires_password_setup INTEGER NOT NULL DEFAULT 0
+          CHECK (requires_password_setup IN (0, 1))
+      `).run();
+    }
+    if (!userColumns.some((column) => column.name === 'invite_code_hash')) {
+      await database.prepare('ALTER TABLE users ADD COLUMN invite_code_hash TEXT').run();
+    }
+    await database.prepare(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_users_invite_code
+        ON users(invite_code_hash) WHERE invite_code_hash IS NOT NULL
+    `).run();
+  });
 
   // Preserve the alphabetical order older releases displayed, then let each user
   // explicitly control it from this point onward. This migration only runs when
   // the column is first added, so subsequent starts never overwrite user choices.
-  const bodyPartColumns = database.prepare('PRAGMA table_info(body_parts)').all() as unknown as Array<{ name: string }>;
-  if (!bodyPartColumns.some((column) => column.name === 'sort_order')) {
-    database.exec(`
-      ALTER TABLE body_parts ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0
-        CHECK (sort_order >= 0);
-      WITH ranked AS (
-        SELECT id,
-          ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY name COLLATE NOCASE, id ASC) - 1 AS position
-        FROM body_parts
-      )
-      UPDATE body_parts
-      SET sort_order = (SELECT position FROM ranked WHERE ranked.id = body_parts.id);
-    `);
-  }
+  await database.transaction(async () => {
+    const bodyPartColumns = await database.prepare('PRAGMA table_info(body_parts)').all() as unknown as Array<{ name: string }>;
+    if (!bodyPartColumns.some((column) => column.name === 'sort_order')) {
+      await database.prepare(`
+        ALTER TABLE body_parts ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0
+          CHECK (sort_order >= 0)
+      `).run();
+      await database.prepare(`
+        WITH ranked AS (
+          SELECT id,
+            ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY name COLLATE NOCASE, id ASC) - 1 AS position
+          FROM body_parts
+        )
+        UPDATE body_parts
+        SET sort_order = (SELECT position FROM ranked WHERE ranked.id = body_parts.id)
+      `).run();
+    }
+  });
 
-  const exerciseColumns = database.prepare('PRAGMA table_info(exercises)').all() as unknown as Array<{ name: string }>;
-  if (!exerciseColumns.some((column) => column.name === 'sort_order')) {
-    database.exec(`
-      ALTER TABLE exercises ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0
-        CHECK (sort_order >= 0);
-      WITH ranked AS (
-        SELECT id,
-          ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY name COLLATE NOCASE, id ASC) - 1 AS position
-        FROM exercises
-      )
-      UPDATE exercises
-      SET sort_order = (SELECT position FROM ranked WHERE ranked.id = exercises.id);
-    `);
-  }
+  await database.transaction(async () => {
+    const exerciseColumns = await database.prepare('PRAGMA table_info(exercises)').all() as unknown as Array<{ name: string }>;
+    if (!exerciseColumns.some((column) => column.name === 'sort_order')) {
+      await database.prepare(`
+        ALTER TABLE exercises ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0
+          CHECK (sort_order >= 0)
+      `).run();
+      await database.prepare(`
+        WITH ranked AS (
+          SELECT id,
+            ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY name COLLATE NOCASE, id ASC) - 1 AS position
+          FROM exercises
+        )
+        UPDATE exercises
+        SET sort_order = (SELECT position FROM ranked WHERE ranked.id = exercises.id)
+      `).run();
+    }
+  });
 
   // Existing installations created before actor snapshots need a safe additive migration.
-  const auditColumns = database.prepare('PRAGMA table_info(audit_log)').all() as unknown as Array<{ name: string }>;
-  if (!auditColumns.some((column) => column.name === 'actor_username')) {
-    database.exec('ALTER TABLE audit_log ADD COLUMN actor_username TEXT');
-  }
+  await database.transaction(async () => {
+    const auditColumns = await database.prepare('PRAGMA table_info(audit_log)').all() as unknown as Array<{ name: string }>;
+    if (!auditColumns.some((column) => column.name === 'actor_username')) {
+      await database.prepare('ALTER TABLE audit_log ADD COLUMN actor_username TEXT').run();
+    }
 
-  database.exec(`
-    UPDATE audit_log
-    SET actor_username = (
-      SELECT users.username FROM users WHERE users.id = audit_log.actor_user_id
-    )
-    WHERE actor_username IS NULL AND actor_user_id IS NOT NULL;
+    await database.prepare(`
+      UPDATE audit_log
+      SET actor_username = (
+        SELECT users.username FROM users WHERE users.id = audit_log.actor_user_id
+      )
+      WHERE actor_username IS NULL AND actor_user_id IS NOT NULL
+    `).run();
+    await database.prepare(`
+      UPDATE audit_log
+      SET metadata = NULL
+      WHERE target_type IN ('body_part', 'measurement', 'exercise', 'lift', 'workout_day', 'meal', 'meal_plan')
+        AND metadata IS NOT NULL
+    `).run();
+  });
 
-    UPDATE audit_log
-    SET metadata = NULL
-    WHERE target_type IN ('body_part', 'measurement', 'exercise', 'lift', 'workout_day', 'meal', 'meal_plan')
-      AND metadata IS NOT NULL;
-  `);
-
-  const users = database.prepare('SELECT id FROM users').all() as unknown as Array<{ id: number }>;
-  for (const user of users) seedUserPlans(database, Number(user.id));
+  const users = await database.prepare('SELECT id FROM users').all() as unknown as Array<{ id: number }>;
+  for (const user of users) await seedUserPlans(database, Number(user.id));
 }
 
-export function seedUserDefaults(database: Database, userId: number): void {
+export async function seedUserDefaults(database: Database, userId: number): Promise<void> {
   const now = new Date().toISOString();
-  const insertBodyPart = database.prepare(`
+  const bodyPartPlaceholders = DEFAULT_BODY_PARTS.map(() => '(?, ?, ?, ?)').join(', ');
+  const bodyPartArgs = DEFAULT_BODY_PARTS.flatMap(([name, unit, color], sortOrder) => [
+    name, unit, color, sortOrder,
+  ]);
+  await database.prepare(`
+    WITH desired(name, unit, color, sort_order) AS (VALUES ${bodyPartPlaceholders})
     INSERT OR IGNORE INTO body_parts (user_id, name, unit, color, sort_order, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `);
-  const insertExercise = database.prepare(`
-    INSERT OR IGNORE INTO exercises (user_id, name, category, unit, color, sort_order, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `);
+    SELECT users.id, desired.name, desired.unit, desired.color, desired.sort_order, ?, ?
+    FROM users CROSS JOIN desired WHERE users.id = ?
+  `).run(...bodyPartArgs, now, now, userId);
 
-  for (const [sortOrder, [name, unit, color]] of DEFAULT_BODY_PARTS.entries()) {
-    insertBodyPart.run(userId, name, unit, color, sortOrder, now, now);
-  }
-  for (const [sortOrder, [name, category, unit, color]] of DEFAULT_EXERCISES.entries()) {
-    insertExercise.run(userId, name, category, unit, color, sortOrder, now, now);
-  }
-  seedUserPlans(database, userId);
+  const exercisePlaceholders = DEFAULT_EXERCISES.map(() => '(?, ?, ?, ?, ?)').join(', ');
+  const exerciseArgs = DEFAULT_EXERCISES.flatMap(([name, category, unit, color], sortOrder) => [
+    name, category, unit, color, sortOrder,
+  ]);
+  await database.prepare(`
+    WITH desired(name, category, unit, color, sort_order) AS (VALUES ${exercisePlaceholders})
+    INSERT OR IGNORE INTO exercises (user_id, name, category, unit, color, sort_order, created_at, updated_at)
+    SELECT users.id, desired.name, desired.category, desired.unit, desired.color,
+      desired.sort_order, ?, ?
+    FROM users CROSS JOIN desired WHERE users.id = ?
+  `).run(...exerciseArgs, now, now, userId);
+
+  await seedUserPlans(database, userId);
 }
 
-export function seedUserPlans(database: Database, userId: number): void {
+export async function seedUserPlans(database: Database, userId: number): Promise<void> {
   const timestamp = new Date().toISOString();
-  const insertDay = database.prepare(`
+  await database.prepare(`
+    WITH desired(day_of_week) AS (VALUES (0), (1), (2), (3), (4), (5), (6))
     INSERT OR IGNORE INTO workout_days (
       user_id, day_of_week, name, is_rest, notes, created_at, updated_at
-    ) VALUES (?, ?, 'Rest day', 1, NULL, ?, ?)
-  `);
-  for (let dayOfWeek = 0; dayOfWeek < 7; dayOfWeek += 1) {
-    insertDay.run(userId, dayOfWeek, timestamp, timestamp);
-  }
-  database.prepare(`
+    )
+    SELECT users.id, desired.day_of_week, 'Rest day', 1, NULL, ?, ?
+    FROM users CROSS JOIN desired WHERE users.id = ?
+  `).run(timestamp, timestamp, userId);
+  await database.prepare(`
     INSERT OR IGNORE INTO meal_plan_settings (
       user_id, show_calories, show_macros, created_at, updated_at
-    ) VALUES (?, 1, 1, ?, ?)
-  `).run(userId, timestamp, timestamp);
+    )
+    SELECT id, 1, 1, ?, ? FROM users WHERE id = ?
+  `).run(timestamp, timestamp, userId);
 }
 
 export interface AuditEntryInput {
@@ -322,18 +499,19 @@ export interface AuditEntryInput {
   ipAddress?: string | null;
 }
 
-export function writeAudit(database: Database, entry: AuditEntryInput): void {
+export async function writeAudit(database: Database, entry: AuditEntryInput): Promise<void> {
   const actorUserId = entry.actorUserId ?? null;
-  const actor = actorUserId == null
-    ? undefined
-    : database.prepare('SELECT username FROM users WHERE id = ?').get(actorUserId) as unknown as { username: string } | undefined;
-  database.prepare(`
+  await database.prepare(`
     INSERT INTO audit_log (
       actor_user_id, actor_username, action, target_type, target_id, metadata, ip_address, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (
+      (SELECT id FROM users WHERE id = ?),
+      (SELECT username FROM users WHERE id = ?),
+      ?, ?, ?, ?, ?, ?
+    )
   `).run(
     actorUserId,
-    actor?.username ?? null,
+    actorUserId,
     entry.action,
     entry.targetType,
     entry.targetId == null ? null : String(entry.targetId),
@@ -343,14 +521,6 @@ export function writeAudit(database: Database, entry: AuditEntryInput): void {
   );
 }
 
-export function runTransaction<T>(database: Database, operation: () => T): T {
-  database.exec('BEGIN IMMEDIATE');
-  try {
-    const result = operation();
-    database.exec('COMMIT');
-    return result;
-  } catch (error) {
-    database.exec('ROLLBACK');
-    throw error;
-  }
+export function runTransaction<T>(database: Database, operation: () => Promise<T>): Promise<T> {
+  return database.transaction(operation);
 }

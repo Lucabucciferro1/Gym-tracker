@@ -9,18 +9,24 @@ import { createApp } from '../server/app.js';
 import { initializeDatabase, openDatabase, type Database } from '../server/db.js';
 
 let database: Database;
-let temporaryDirectory: string;
-let app: ReturnType<typeof createApp>;
+let temporaryDirectory: string | undefined;
+let app: Awaited<ReturnType<typeof createApp>>;
 
-beforeEach(() => {
-  temporaryDirectory = mkdtempSync(join(tmpdir(), 'forge-ordering-test-'));
-  database = openDatabase(join(temporaryDirectory, 'forge.db'));
-  app = createApp({ database, cookieSecure: false, serveStatic: false });
+beforeEach(async () => {
+  database = await openDatabase(':memory:');
+  app = await createApp({ database, cookieSecure: false, serveStatic: false });
 });
 
-afterEach(() => {
-  database.close();
-  rmSync(temporaryDirectory, { recursive: true, force: true });
+afterEach(async () => {
+  await database.close();
+  if (!temporaryDirectory) return;
+  try {
+    rmSync(temporaryDirectory, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (process.platform !== 'win32' || code !== 'EPERM') throw error;
+  }
+  temporaryDirectory = undefined;
 });
 
 async function setupAdmin() {
@@ -116,7 +122,7 @@ describe('persisted resource ordering', () => {
     expect(shared.body.data.lifts.map((item: { exercise: { id: number } }) => item.exercise.id))
       .toEqual(expectedExercises);
 
-    expect(database.prepare(`
+    expect(await database.prepare(`
       SELECT action, target_type, target_id, metadata FROM audit_log
       WHERE action IN ('body_parts.reordered', 'exercises.reordered') ORDER BY id
     `).all()).toEqual([
@@ -163,7 +169,7 @@ describe('persisted resource ordering', () => {
     await other.agent.put('/api/exercises/order').send({ ids: ownerExerciseIds }).expect(400);
     expect(idsOf((await other.agent.get('/api/body-parts').expect(200)).body.data.bodyParts)).toEqual(otherPartIds);
     expect(idsOf((await other.agent.get('/api/exercises').expect(200)).body.data.exercises)).toEqual(otherExerciseIds);
-    expect(database.prepare(`
+    expect(await database.prepare(`
       SELECT COUNT(*) AS count FROM audit_log
       WHERE action IN ('body_parts.reordered', 'exercises.reordered')
     `).get()).toEqual({ count: 0 });
@@ -171,8 +177,9 @@ describe('persisted resource ordering', () => {
 });
 
 describe('ordering migration', () => {
-  it('backfills legacy rows in their former alphabetical order exactly once', () => {
-    database.close();
+  it('backfills legacy rows in their former alphabetical order exactly once', async () => {
+    await database.close();
+    temporaryDirectory = mkdtempSync(join(tmpdir(), 'forge-ordering-legacy-test-'));
     const databasePath = join(temporaryDirectory, 'legacy.db');
     const legacy = new DatabaseSync(databasePath);
     const timestamp = new Date().toISOString();
@@ -222,15 +229,15 @@ describe('ordering migration', () => {
     `);
     legacy.close();
 
-    database = openDatabase(databasePath);
-    expect(database.prepare(`
+    database = await openDatabase(databasePath);
+    expect(await database.prepare(`
       SELECT name, sort_order FROM body_parts ORDER BY sort_order, id
     `).all()).toEqual([
       { name: 'alpha', sort_order: 0 },
       { name: 'Middle', sort_order: 1 },
       { name: 'Zed', sort_order: 2 },
     ]);
-    expect(database.prepare(`
+    expect(await database.prepare(`
       SELECT name, sort_order FROM exercises ORDER BY sort_order, id
     `).all()).toEqual([
       { name: 'bench press', sort_order: 0 },
@@ -238,14 +245,14 @@ describe('ordering migration', () => {
       { name: 'Zercher squat', sort_order: 2 },
     ]);
 
-    database.prepare(`UPDATE body_parts SET sort_order = CASE name
+    await database.prepare(`UPDATE body_parts SET sort_order = CASE name
       WHEN 'Zed' THEN 0 WHEN 'Middle' THEN 1 ELSE 2 END`).run();
-    database.prepare(`UPDATE exercises SET sort_order = CASE name
+    await database.prepare(`UPDATE exercises SET sort_order = CASE name
       WHEN 'Zercher squat' THEN 0 WHEN 'Deadlift' THEN 1 ELSE 2 END`).run();
-    initializeDatabase(database);
-    expect(database.prepare('SELECT name FROM body_parts ORDER BY sort_order, id').all())
+    await initializeDatabase(database);
+    expect(await database.prepare('SELECT name FROM body_parts ORDER BY sort_order, id').all())
       .toEqual([{ name: 'Zed' }, { name: 'Middle' }, { name: 'alpha' }]);
-    expect(database.prepare('SELECT name FROM exercises ORDER BY sort_order, id').all())
+    expect(await database.prepare('SELECT name FROM exercises ORDER BY sort_order, id').all())
       .toEqual([{ name: 'Zercher squat' }, { name: 'Deadlift' }, { name: 'bench press' }]);
   });
 });

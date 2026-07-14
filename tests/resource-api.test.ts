@@ -1,6 +1,3 @@
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import request from 'supertest';
 
@@ -9,23 +6,20 @@ import { openDatabase, type Database } from '../server/db.js';
 import { hashPassword } from '../server/security.js';
 
 let database: Database;
-let temporaryDirectory: string;
-let app: ReturnType<typeof createApp>;
+let app: Awaited<ReturnType<typeof createApp>>;
 
-beforeEach(() => {
-  temporaryDirectory = mkdtempSync(join(tmpdir(), 'forge-resource-test-'));
-  database = openDatabase(join(temporaryDirectory, 'forge.db'));
-  app = createApp({ database, cookieSecure: false, serveStatic: false });
+beforeEach(async () => {
+  database = await openDatabase(':memory:');
+  app = await createApp({ database, cookieSecure: false, serveStatic: false });
 });
 
-afterEach(() => {
-  database.close();
-  rmSync(temporaryDirectory, { recursive: true, force: true });
+afterEach(async () => {
+  await database.close();
 });
 
 async function createMember(username = 'Member', password = 'Member password!') {
   const timestamp = new Date().toISOString();
-  database.prepare(`
+  await database.prepare(`
     INSERT INTO users (username, password_hash, role, is_active, created_at, updated_at)
     VALUES (?, ?, 'user', 1, ?, ?)
   `).run(username, await hashPassword(password), timestamp, timestamp);
@@ -70,8 +64,8 @@ describe('authenticated resource APIs', () => {
     await admin.post(`/api/exercises/${benchId}/lifts`).send({ weight: 100, reps: 1.5 }).expect(400);
     await admin.get('/api/exercises/not-an-id/lifts').expect(400);
 
-    expect(database.prepare('SELECT COUNT(*) AS count FROM measurements').get()).toEqual({ count: 0 });
-    expect(database.prepare('SELECT COUNT(*) AS count FROM lift_records').get()).toEqual({ count: 0 });
+    expect(await database.prepare('SELECT COUNT(*) AS count FROM measurements').get()).toEqual({ count: 0 });
+    expect(await database.prepare('SELECT COUNT(*) AS count FROM lift_records').get()).toEqual({ count: 0 });
   });
 
   it('locks units while historical records exist and unlocks them after record deletion', async () => {

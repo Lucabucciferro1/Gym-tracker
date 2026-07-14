@@ -1,6 +1,3 @@
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import request from 'supertest';
 
@@ -11,13 +8,11 @@ import { hashPassword } from '../server/security.js';
 const ADMIN_PASSWORD = 'Admin setup password!';
 
 let database: Database;
-let temporaryDirectory: string;
-let app: ReturnType<typeof createApp>;
+let app: Awaited<ReturnType<typeof createApp>>;
 
-beforeEach(() => {
-  temporaryDirectory = mkdtempSync(join(tmpdir(), 'forge-api-test-'));
-  database = openDatabase(join(temporaryDirectory, 'forge.db'));
-  app = createApp({
+beforeEach(async () => {
+  database = await openDatabase(':memory:');
+  app = await createApp({
     database,
     cookieSecure: false,
     serveStatic: false,
@@ -25,9 +20,8 @@ beforeEach(() => {
   });
 });
 
-afterEach(() => {
-  database.close();
-  rmSync(temporaryDirectory, { recursive: true, force: true });
+afterEach(async () => {
+  await database.close();
 });
 
 async function insertUser(
@@ -36,7 +30,7 @@ async function insertUser(
   options: { role?: 'user' | 'admin'; active?: boolean } = {},
 ): Promise<number> {
   const timestamp = new Date().toISOString();
-  const result = database.prepare(`
+  const result = await database.prepare(`
     INSERT INTO users (username, password_hash, role, is_active, created_at, updated_at)
     VALUES (?, ?, ?, ?, ?, ?)
   `).run(
@@ -79,13 +73,13 @@ describe('first-run setup', () => {
     const authenticated = await agent.get('/api/auth/me').expect(200);
     expect(authenticated.body.data.user).toMatchObject({ username: 'Admin', role: 'admin' });
 
-    const storedUser = database.prepare(
+    const storedUser = await database.prepare(
       'SELECT username, role, password_hash FROM users',
     ).get() as { username: string; role: string; password_hash: string };
     expect(storedUser).toMatchObject({ username: 'Admin', role: 'admin' });
     expect(storedUser.password_hash).not.toContain(ADMIN_PASSWORD);
 
-    const storedSession = database.prepare('SELECT token_hash FROM sessions').get() as { token_hash: string };
+    const storedSession = await database.prepare('SELECT token_hash FROM sessions').get() as { token_hash: string };
     expect(storedSession.token_hash).toMatch(/^[a-f0-9]{64}$/);
   });
 
@@ -96,7 +90,7 @@ describe('first-run setup', () => {
       .expect(201);
 
     expect(setup.body.data.user).toMatchObject({ username: 'Coach', role: 'admin' });
-    expect(database.prepare('SELECT username, role FROM users').get())
+    expect(await database.prepare('SELECT username, role FROM users').get())
       .toEqual({ username: 'Coach', role: 'admin' });
   });
 
@@ -117,7 +111,7 @@ describe('first-run setup', () => {
         expect(body).toMatchObject({ error: { code: 'VALIDATION_ERROR' } });
       });
 
-    expect(database.prepare('SELECT COUNT(*) AS count FROM users').get()).toEqual({ count: 0 });
+    expect(await database.prepare('SELECT COUNT(*) AS count FROM users').get()).toEqual({ count: 0 });
 
     await request(app).post('/api/auth/setup').send({ password: ADMIN_PASSWORD }).expect(201);
     await request(app)
@@ -128,7 +122,7 @@ describe('first-run setup', () => {
         expect(body).toMatchObject({ error: { code: 'ALREADY_CONFIGURED' } });
       });
 
-    expect(database.prepare('SELECT COUNT(*) AS count FROM users').get()).toEqual({ count: 1 });
+    expect(await database.prepare('SELECT COUNT(*) AS count FROM users').get()).toEqual({ count: 1 });
   });
 
   it('does not let calls to the closed setup endpoint exhaust the login quota', async () => {
@@ -191,7 +185,7 @@ describe('login and session lifecycle', () => {
       .expect(403);
 
     expect(response.body).toMatchObject({ error: { code: 'ACCOUNT_DISABLED' } });
-    expect(database.prepare('SELECT COUNT(*) AS count FROM sessions').get()).toEqual({ count: 0 });
+    expect(await database.prepare('SELECT COUNT(*) AS count FROM sessions').get()).toEqual({ count: 0 });
   });
 
   it('invalidates the server-side session at logout', async () => {
@@ -248,7 +242,7 @@ describe('login and session lifecycle', () => {
       .expect(({ body }: { body: { data: { user: { username: string; role: string } } } }) => {
         expect(body.data.user).toMatchObject({ username: 'Coach', role: 'admin' });
       });
-    expect(database.prepare('SELECT COUNT(*) AS count FROM sessions').get()).toEqual({ count: 1 });
+    expect(await database.prepare('SELECT COUNT(*) AS count FROM sessions').get()).toEqual({ count: 1 });
 
     await request(app)
       .post('/api/auth/login')
@@ -259,7 +253,7 @@ describe('login and session lifecycle', () => {
       .send({ username: 'cOaCh', password: ADMIN_PASSWORD })
       .expect(200);
 
-    const audit = database.prepare(`
+    const audit = await database.prepare(`
       SELECT actor_username, metadata FROM audit_log
       WHERE action = 'auth.username_changed'
     `).get() as { actor_username: string; metadata: string };
@@ -284,7 +278,7 @@ describe('login and session lifecycle', () => {
       .expect(({ body }: { body: unknown }) => {
         expect(body).toMatchObject({ error: { code: 'USERNAME_EXISTS' } });
       });
-    expect(database.prepare('SELECT username, role FROM users WHERE role = ?').get('admin'))
+    expect(await database.prepare('SELECT username, role FROM users WHERE role = ?').get('admin'))
       .toEqual({ username: 'Admin', role: 'admin' });
   });
 });
@@ -303,7 +297,7 @@ describe('invitation activation', () => {
       username: 'Invited',
       requiresPasswordSetup: true,
     });
-    expect(database.prepare(`
+    expect(await database.prepare(`
       SELECT password_hash, invite_code_hash, requires_password_setup
       FROM users WHERE username = 'Invited'
     `).get()).toMatchObject({
@@ -332,7 +326,7 @@ describe('invitation activation', () => {
       requiresPasswordSetup: false,
     });
     await invited.get('/api/auth/me').expect(200);
-    expect(database.prepare(`
+    expect(await database.prepare(`
       SELECT invite_code_hash, requires_password_setup FROM users WHERE username = 'Invited'
     `).get()).toEqual({ invite_code_hash: null, requires_password_setup: 0 });
     await request(app)
