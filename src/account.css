@@ -1,0 +1,330 @@
+.account-control {
+  position: relative;
+  width: 100%;
+}
+
+.sidebar__account > svg {
+  transition: transform 160ms ease;
+}
+
+.sidebar__account.is-open > svg {
+  transform: rotate(180deg);
+}
+
+.account-popover {
+  position: absolute;
+  z-index: 45;
+  right: 0;
+  bottom: calc(100% + 9px);
+  left: 0;
+  padding: 7px;
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  background: rgba(255, 255, 255, 0.98);
+  color: var(--text);
+  box-shadow: 0 18px 52px rgba(7, 16, 10, 0.28);
+  animation: rise 160ms ease both;
+}
+
+.account-popover__identity {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 1px 2px 6px;
+  padding: 8px 9px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.account-popover__avatar {
+  display: grid;
+  width: 31px;
+  height: 31px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 9px;
+  background: var(--primary-soft);
+  color: var(--primary);
+  font-size: 11px;
+  font-weight: 850;
+}
+
+.account-popover__identity > span:last-child,
+.account-popover button > span {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.account-popover__identity strong,
+.account-popover button strong {
+  font-size: 11px;
+}
+
+.account-popover__identity small,
+.account-popover button small {
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.account-popover > button {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 10px;
+  padding: 9px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--text-soft);
+  text-align: left;
+}
+
+.account-popover > button > svg {
+  flex: 0 0 auto;
+  color: var(--primary);
+}
+
+.account-popover > button:hover,
+.account-popover > button:focus-visible {
+  background: var(--surface-soft);
+}
+
+.account-popover > .account-popover__danger {
+  margin-top: 3px;
+  border-top: 1px solid var(--border-subtle);
+  border-radius: 0 0 9px 9px;
+}
+
+.account-popover > .account-popover__danger > svg {
+  color: var(--danger);
+}
+
+.account-popover > .account-popover__danger:hover,
+.account-popover > .account-popover__danger:focus-visible {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.mobile-account-button[aria-expanded="true"] {
+  box-shadow: 0 0 0 3px rgba(185, 219, 115, 0.22);
+}
+
+.account-modal {
+  display: flex;
+  flex-direction: column;
+  gap: 17px;
+}
+
+.account-modal__profile {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 13px 14px;
+  border: 1px solid #d8e5d9;
+  border-radius: 12px;
+  background: var(--primary-soft);
+}
+
+.account-modal__profile:focus {
+  outline: 3px solid rgba(55, 107, 73, 0.2);
+  outline-offset: 2px;
+}
+
+.account-modal__avatar {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  place-items: center;
+  border-radius: 12px;
+  background: var(--primary);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 850;
+}
+
+.account-modal__profile > div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.account-modal__profile strong {
+  overflow: hidden;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-modal__profile span {
+  color: var(--text-muted);
+  font-size: 10.5px;
+}
+
+.account-modal__profile > svg {
+  color: var(--primary);
+}
+
+.account-modal__layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(220px, 0.75fr);
+  align-items: start;
+  gap: 14px;
+}
+
+.account-modal__main {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.account-modal__card,
+.account-action-card {
+  padding: 17px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 13px;
+  background: var(--surface-soft);
+}
+
+.account-modal__heading {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 17px;
+}
+
+.account-modal__heading-icon,
+.account-action-card__icon {
+  display: grid;
+  width: 35px;
+  height: 35px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 10px;
+  background: var(--primary-soft);
+  color: var(--primary);
+}
+
+.account-modal h3 {
+  margin: 1px 0 4px;
+  font-size: 13px;
+  letter-spacing: -0.01em;
+}
+
+.account-modal__heading p,
+.account-action-card p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+
+.account-modal__card .button {
+  justify-self: flex-start;
+}
+
+.account-form-success {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 11px 13px;
+  border: 1px solid #cbdccf;
+  border-radius: 10px;
+  background: var(--primary-soft);
+  color: var(--primary);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.45;
+}
+
+.account-form-success > svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.account-modal__side {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.account-action-card {
+  display: flex;
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.account-action-card > div {
+  min-height: 53px;
+}
+
+.account-action-card > .button {
+  width: 100%;
+  margin-top: auto;
+}
+
+.account-action-card--danger {
+  border-color: #efd0cd;
+  background: var(--danger-soft);
+}
+
+.account-action-card--danger .account-action-card__icon {
+  background: #f4d8d5;
+  color: var(--danger);
+}
+
+@media (min-width: 761px) and (max-width: 980px) {
+  .account-control {
+    width: 100%;
+    margin-top: auto;
+  }
+
+  .account-popover {
+    right: auto;
+    bottom: 0;
+    left: calc(100% + 12px);
+    width: 224px;
+  }
+}
+
+@media (max-width: 620px) {
+  .account-modal__layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .account-modal__card,
+  .account-action-card {
+    padding: 15px;
+  }
+
+  .account-modal__card .button {
+    width: 100%;
+  }
+
+  .account-modal__side {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 440px) {
+  .account-modal__side {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .account-action-card > div {
+    min-height: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .account-popover {
+    animation: none;
+  }
+}

@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: forge-gym-tracker
+    runtime: node
+    plan: starter
+    region: frankfurt
+    buildCommand: npm ci --include=dev && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    autoDeployTrigger: checksPass
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: NODE_VERSION
+        value: "24"
+      - key: DATABASE_PATH
+        value: /var/data/forge.db
+      - key: SESSION_DAYS
+        value: "30"
+      - key: COOKIE_SECURE
+        value: "1"
+      - key: TRUST_PROXY
+        value: "1"
+    disk:
+      name: forge-data
+      mountPath: /var/data
+      sizeGB: 1
