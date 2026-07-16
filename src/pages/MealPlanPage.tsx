@@ -456,7 +456,7 @@ function MealModal({
     >
       <form id="meal-plan-form" className="form-stack plan-form" onSubmit={submit}>
         {error && <div className="form-alert" role="alert">{error}</div>}
-        <label className="field"><span>Meal name</span><input value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. Greek yoghurt breakfast" maxLength={80} required autoFocus /></label>
+        <label className="field"><span>Meal name</span><input value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. Greek yoghurt breakfast" maxLength={80} required data-modal-autofocus /></label>
         <label className="field">
           <span>Plan day</span>
           <select value={targetDay} onChange={(event) => setTargetDay(Number(event.target.value))}>

@@ -8,6 +8,7 @@ import {
   X,
 } from 'lucide-react'
 import { useEffect, useId, useRef, type ButtonHTMLAttributes, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import type { DateRange } from '../types'
 
 type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'danger'
@@ -121,8 +122,24 @@ export function Modal({
 
   useEffect(() => {
     if (!open) return
-    const previousOverflow = document.body.style.overflow
+    const body = document.body
+    const previousOverflow = body.style.overflow
+    const previousPosition = body.style.position
+    const previousTop = body.style.top
+    const previousLeft = body.style.left
+    const previousWidth = body.style.width
+    const scrollX = window.scrollX
+    const scrollY = window.scrollY
+    const touchInput = navigator.maxTouchPoints > 0
+      || (window.matchMedia?.('(any-pointer: coarse)').matches ?? false)
+
     document.body.style.overflow = 'hidden'
+    if (touchInput) {
+      body.style.position = 'fixed'
+      body.style.top = `-${scrollY}px`
+      body.style.left = `-${scrollX}px`
+      body.style.width = '100%'
+    }
 
     const modal = modalRef.current
     const backdrop = backdropRef.current
@@ -133,15 +150,20 @@ export function Modal({
     }> = []
 
     if (modal) {
-      const preferredFocus = modal.querySelector<HTMLElement>('[autofocus]')
-        ?? modal.querySelector<HTMLElement>('input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled])')
-        ?? focusableElements(modal)[0]
-        ?? modal
+      // Focusing a field as a bottom sheet opens the software keyboard before
+      // mobile Safari has positioned the dialog. Keep focus on the dialog on
+      // touch devices; desktop users still land in the preferred field.
+      const preferredFocus = touchInput
+        ? modal
+        : modal.querySelector<HTMLElement>('[data-modal-autofocus]')
+          ?? modal.querySelector<HTMLElement>('input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled])')
+          ?? focusableElements(modal)[0]
+          ?? modal
       preferredFocus.focus({ preventScroll: true })
     }
 
     let activeBranch: HTMLElement | null = backdrop
-    while (activeBranch?.parentElement && activeBranch.parentElement !== document.body) {
+    while (activeBranch?.parentElement) {
       const parent = activeBranch.parentElement
       Array.from(parent.children).forEach((sibling) => {
         if (sibling === activeBranch || !(sibling instanceof HTMLElement)) return
@@ -153,6 +175,7 @@ export function Modal({
         sibling.setAttribute('aria-hidden', 'true')
         sibling.setAttribute('inert', '')
       })
+      if (parent === document.body) break
       activeBranch = parent
     }
 
@@ -184,7 +207,12 @@ export function Modal({
     }
     document.addEventListener('keydown', onKeyDown)
     return () => {
-      document.body.style.overflow = previousOverflow
+      body.style.overflow = previousOverflow
+      body.style.position = previousPosition
+      body.style.top = previousTop
+      body.style.left = previousLeft
+      body.style.width = previousWidth
+      if (touchInput) window.scrollTo(scrollX, scrollY)
       document.removeEventListener('keydown', onKeyDown)
       isolatedElements.reverse().forEach(({ element, ariaHidden, hadInertAttribute }) => {
         if (ariaHidden === null) element.removeAttribute('aria-hidden')
@@ -199,7 +227,7 @@ export function Modal({
 
   if (!open) return null
 
-  return (
+  return createPortal(
     <div ref={backdropRef} className="modal-backdrop" role="presentation" onMouseDown={onClose}>
       <section
         ref={modalRef}
@@ -222,7 +250,8 @@ export function Modal({
         <div className="modal__body">{children}</div>
         {footer && <footer className="modal__footer">{footer}</footer>}
       </section>
-    </div>
+    </div>,
+    document.body,
   )
 }
 

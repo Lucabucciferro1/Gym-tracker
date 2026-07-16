@@ -588,7 +588,7 @@ function ExerciseModal({
     >
       <form id="exercise-form" className="form-stack" onSubmit={submit}>
         {error && <div className="form-alert" role="alert">{error}</div>}
-        <label className="field"><span>Exercise name</span><input value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. Incline bench press" maxLength={80} required autoFocus /></label>
+        <label className="field"><span>Exercise name</span><input value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. Incline bench press" maxLength={80} required data-modal-autofocus /></label>
         <div className="form-grid">
           <label className="field"><span>Category</span><input value={category} onChange={(event) => setCategory(event.target.value)} placeholder="Strength" maxLength={40} required /></label>
           <label className="field">
@@ -654,7 +654,7 @@ function LiftModal({
       <form id="lift-form" className="form-stack" onSubmit={submit}>
         {error && <div className="form-alert" role="alert">{error}</div>}
         <div className="form-grid">
-          <label className="field"><span>Weight ({exercise?.unit})</span><input type="number" min="0.01" step="any" value={weight} onChange={(event) => setWeight(event.target.value)} placeholder="0.0" required autoFocus /></label>
+          <label className="field"><span>Weight ({exercise?.unit})</span><input type="number" min="0.01" step="any" value={weight} onChange={(event) => setWeight(event.target.value)} placeholder="0.0" required data-modal-autofocus /></label>
           <label className="field"><span>Reps</span><input type="number" min="1" max="1000" step="1" value={reps} onChange={(event) => setReps(event.target.value)} required /></label>
         </div>
         {estimate != null && Number.isFinite(estimate) && <div className="estimate-preview"><BarChart3 size={18} /><span>Estimated 1RM</span><strong>{estimate.toFixed(1)} {exercise?.unit}</strong></div>}

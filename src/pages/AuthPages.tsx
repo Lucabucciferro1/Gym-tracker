@@ -47,7 +47,7 @@ export function LoginPage() {
   const { loading, setupRequired, user, login, refresh } = useAuth()
   const navigate = useNavigate()
   const [mode, setMode] = useState<'login' | 'activate'>('login')
-  const [username, setUsername] = useState('Admin')
+  const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [inviteCode, setInviteCode] = useState('')
   const [newPassword, setNewPassword] = useState('')
@@ -125,7 +125,7 @@ export function LoginPage() {
       <main className="auth-form-panel">
         <div className="auth-mobile-brand"><Brand /></div>
         {mode === 'login' ? (
-        <form className="auth-card" onSubmit={(event) => void handleSubmit(event)}>
+        <form className="auth-card" autoComplete="off" onSubmit={(event) => void handleSubmit(event)}>
           <div className="auth-card__heading">
             <span className="auth-icon"><LockKeyhole size={21} /></span>
             <span className="eyebrow">WELCOME BACK</span>
@@ -139,12 +139,14 @@ export function LoginPage() {
             <span>Username</span>
             <input
               type="text"
-              autoComplete="username"
+              autoComplete="off"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
               value={username}
               onChange={(event) => setUsername(event.target.value)}
               placeholder="Enter your username"
               required
-              autoFocus
             />
           </label>
           <label className="field">
@@ -152,7 +154,7 @@ export function LoginPage() {
             <span className="password-input">
               <input
                 type={showPassword ? 'text' : 'password'}
-                autoComplete="current-password"
+                autoComplete="off"
                 value={password}
                 onChange={(event) => setPassword(event.target.value)}
                 placeholder="Enter your password"
@@ -175,7 +177,7 @@ export function LoginPage() {
           </div>
         </form>
         ) : (
-          <form className="auth-card" onSubmit={(event) => void handleActivation(event)}>
+          <form className="auth-card" autoComplete="off" onSubmit={(event) => void handleActivation(event)}>
             <div className="auth-card__heading">
               <span className="auth-icon"><TicketCheck size={22} /></span>
               <span className="eyebrow">FIRST-TIME ACCESS</span>
@@ -189,20 +191,24 @@ export function LoginPage() {
               <span>Username</span>
               <input
                 type="text"
-                autoComplete="username"
+                autoComplete="off"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
                 value={username}
                 onChange={(event) => setUsername(event.target.value)}
                 placeholder="Username from your invitation"
                 maxLength={32}
                 required
-                autoFocus
               />
             </label>
             <label className="field">
               <span>One-time invite code</span>
               <input
                 type="text"
-                autoComplete="one-time-code"
+                autoComplete="off"
+                autoCapitalize="none"
+                autoCorrect="off"
                 value={inviteCode}
                 onChange={(event) => setInviteCode(event.target.value)}
                 placeholder="Enter your invite code"
@@ -216,7 +222,7 @@ export function LoginPage() {
               <span className="password-input">
                 <input
                   type={showPassword ? 'text' : 'password'}
-                  autoComplete="new-password"
+                  autoComplete="off"
                   value={newPassword}
                   onChange={(event) => setNewPassword(event.target.value)}
                   placeholder="At least 8 characters"
@@ -236,7 +242,7 @@ export function LoginPage() {
               <span>Confirm password</span>
               <input
                 type={showPassword ? 'text' : 'password'}
-                autoComplete="new-password"
+                autoComplete="off"
                 value={confirmPassword}
                 onChange={(event) => setConfirmPassword(event.target.value)}
                 placeholder="Enter it again"
@@ -264,7 +270,7 @@ export function LoginPage() {
 export function SetupPage() {
   const { loading, setupRequired, user, setup } = useAuth()
   const navigate = useNavigate()
-  const [username, setUsername] = useState('Admin')
+  const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
   const [showPassword, setShowPassword] = useState(false)
@@ -306,7 +312,7 @@ export function SetupPage() {
       <AuthVisual setup />
       <main className="auth-form-panel">
         <div className="auth-mobile-brand"><Brand /></div>
-        <form className="auth-card" onSubmit={(event) => void handleSubmit(event)}>
+        <form className="auth-card" autoComplete="off" onSubmit={(event) => void handleSubmit(event)}>
           <div className="auth-card__heading">
             <span className="auth-icon"><ShieldCheck size={22} /></span>
             <span className="eyebrow">FIRST-RUN SETUP</span>
@@ -325,19 +331,21 @@ export function SetupPage() {
               minLength={2}
               maxLength={32}
               pattern="[A-Za-z0-9_.-]+"
-              autoComplete="username"
+              autoComplete="off"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
               aria-describedby="admin-help"
               required
-              autoFocus
             />
-            <small id="admin-help">Defaults to Admin. Letters, numbers, dots, underscores, and hyphens only.</small>
+            <small id="admin-help">Use letters, numbers, dots, underscores, or hyphens.</small>
           </label>
           <label className="field">
             <span>Create password</span>
             <span className="password-input">
               <input
                 type={showPassword ? 'text' : 'password'}
-                autoComplete="new-password"
+                autoComplete="off"
                 value={password}
                 onChange={(event) => setPassword(event.target.value)}
                 placeholder="At least 8 characters"
@@ -355,7 +363,7 @@ export function SetupPage() {
             <span>Confirm password</span>
             <input
               type={showPassword ? 'text' : 'password'}
-              autoComplete="new-password"
+              autoComplete="off"
               value={confirmPassword}
               onChange={(event) => setConfirmPassword(event.target.value)}
               placeholder="Enter it again"

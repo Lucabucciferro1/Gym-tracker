@@ -576,7 +576,7 @@ function BodyPartModal({
     >
       <form id="body-part-form" className="form-stack" onSubmit={submit}>
         {error && <div className="form-alert" role="alert">{error}</div>}
-        <label className="field"><span>Name</span><input value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. Forearms" maxLength={60} required autoFocus /></label>
+        <label className="field"><span>Name</span><input value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. Forearms" maxLength={60} required data-modal-autofocus /></label>
         <div className="form-grid">
           <label className="field">
             <span>Unit</span>
@@ -637,7 +637,7 @@ function MeasurementModal({
       <form id="measurement-form" className="form-stack" onSubmit={submit}>
         {error && <div className="form-alert" role="alert">{error}</div>}
         <div className="form-grid">
-          <label className="field"><span>Value ({part?.unit})</span><input type="number" min="0.01" step="any" value={value} onChange={(event) => setValue(event.target.value)} placeholder="0.0" required autoFocus /></label>
+          <label className="field"><span>Value ({part?.unit})</span><input type="number" min="0.01" step="any" value={value} onChange={(event) => setValue(event.target.value)} placeholder="0.0" required data-modal-autofocus /></label>
           <label className="field"><span>Date</span><input type="date" value={recordedAt} max={todayInput()} onChange={(event) => setRecordedAt(event.target.value)} required /></label>
         </div>
         <label className="field"><span>Note <small>Optional</small></span><textarea value={note} onChange={(event) => setNote(event.target.value)} placeholder="How you measured, time of day, or anything useful..." maxLength={500} rows={4} /></label>

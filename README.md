@@ -11,7 +11,7 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:5173`. On the first visit, Forge asks you to create the administrator account. Its username starts as `Admin`, but you can choose another name before setup and rename it later from account settings. No default password or credentials are stored in the repository.
+Open `http://localhost:5173`. On the first visit, Forge asks you to choose the administrator username and password. Both fields start blank, and the username can be changed later from account settings. No default credentials are stored in the repository.
 
 The development command starts:
 

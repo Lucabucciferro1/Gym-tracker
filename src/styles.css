@@ -1520,6 +1520,14 @@ td strong {
   box-shadow: 0 0 0 3px rgba(55, 107, 73, 0.1);
 }
 
+@media (any-pointer: coarse) {
+  .field input,
+  .field textarea,
+  .field select {
+    font-size: 16px;
+  }
+}
+
 .field input:disabled {
   background: var(--surface-soft);
   color: var(--text-muted);
@@ -1676,13 +1684,17 @@ td strong {
 .modal-backdrop {
   position: fixed;
   z-index: 100;
-  inset: 0;
+  inset: 0 0 auto;
   display: grid;
+  width: 100%;
+  height: 100vh;
+  height: 100dvh;
   overflow: auto;
   place-items: center;
   padding: 24px;
   background: rgba(12, 20, 15, 0.58);
   backdrop-filter: blur(5px);
+  overscroll-behavior: contain;
   animation: fadeIn 150ms ease both;
 }
 
@@ -1693,6 +1705,7 @@ td strong {
 .modal {
   width: min(100%, 520px);
   max-height: calc(100vh - 48px);
+  max-height: calc(100dvh - 48px);
   overflow: auto;
   border: 1px solid rgba(255, 255, 255, 0.6);
   border-radius: var(--radius-lg);
@@ -2532,12 +2545,14 @@ td strong {
 
   .modal-backdrop {
     align-items: end;
+    overflow: hidden;
     padding: 0;
   }
 
   .modal {
     width: 100%;
     max-height: calc(100vh - 30px);
+    max-height: calc(100dvh - 30px);
     border-radius: 20px 20px 0 0;
   }
 
@@ -2553,6 +2568,7 @@ td strong {
   .auth-layout {
     display: block;
     min-height: 100vh;
+    min-height: 100dvh;
   }
 
   .auth-visual {
@@ -2561,8 +2577,9 @@ td strong {
 
   .auth-form-panel {
     min-height: 100vh;
-    align-content: center;
-    padding: 35px 22px;
+    min-height: 100dvh;
+    align-content: start;
+    padding: max(35px, env(safe-area-inset-top)) max(22px, env(safe-area-inset-right)) max(35px, env(safe-area-inset-bottom)) max(22px, env(safe-area-inset-left));
     background:
       linear-gradient(to bottom, var(--sidebar) 0, var(--sidebar) 126px, transparent 126px),
       var(--surface);

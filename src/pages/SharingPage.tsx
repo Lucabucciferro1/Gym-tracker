@@ -448,7 +448,7 @@ function CreateShareModal({
         {(localError || error) && <div className="form-alert" role="alert">{localError || error}</div>}
         <label className="field">
           <span>Friend</span>
-          <select value={viewerUserId ?? ''} onChange={(event) => setViewerUserId(Number(event.target.value))} required autoFocus>
+          <select value={viewerUserId ?? ''} onChange={(event) => setViewerUserId(Number(event.target.value))} required data-modal-autofocus>
             {users.map((user) => <option value={user.id} key={user.id}>{user.username}</option>)}
           </select>
         </label>

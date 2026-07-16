@@ -559,7 +559,7 @@ function CreateUserModal({
             pattern="[A-Za-z0-9_.-]+"
             autoComplete="off"
             required
-            autoFocus
+            data-modal-autofocus
           />
           <small>Letters, numbers, dots, underscores, and hyphens only.</small>
         </label>
@@ -676,7 +676,7 @@ function DeleteUserModal({
             onChange={(event) => setConfirmation(event.target.value)}
             autoComplete="off"
             disabled={busy}
-            autoFocus
+            data-modal-autofocus
           />
         </label>
       </div>

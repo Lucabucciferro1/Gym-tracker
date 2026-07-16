@@ -382,7 +382,7 @@ function WorkoutDayModal({
           </div>
         )}
 
-        <label className="field"><span>Session name</span><input value={name} onChange={(event) => setName(event.target.value)} placeholder={isRest ? 'e.g. Full recovery' : 'e.g. Push day'} maxLength={80} required autoFocus /></label>
+        <label className="field"><span>Session name</span><input value={name} onChange={(event) => setName(event.target.value)} placeholder={isRest ? 'e.g. Full recovery' : 'e.g. Push day'} maxLength={80} required data-modal-autofocus /></label>
 
         {!isRest && (
           <section className="plan-form-section" aria-labelledby="exercise-list-heading">
