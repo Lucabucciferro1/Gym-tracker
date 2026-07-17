@@ -1,22 +1,28 @@
 import {
   Apple,
   Beef,
+  Calculator,
   Carrot,
   Flame,
   Gauge,
+  Info,
+  LoaderCircle,
   Pencil,
   Plus,
   RotateCcw,
+  Scale,
   Settings2,
   Trash2,
   Utensils,
   Wheat,
 } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useState, type FormEvent, type KeyboardEvent, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from 'react'
 import { api, errorMessage } from '../api'
+import { calculateBmr, heightToCentimeters, normalizeWeightUnit, weightToKilograms, type BmrFormulaSex, type WeightUnit } from '../bmr'
 import { Button, ConfirmDialog, EmptyState, ErrorNotice, Modal, PageHeader } from '../components/ui'
 import { useToast } from '../context/ToastContext'
-import type { Meal, MealPlan, MealPlanSettings } from '../types'
+import type { BmrProfile, BmrProfileInput, BodyPart, Meal, MealPlan, MealPlanSettings, Measurement } from '../types'
+import { formatDate } from '../utils'
 import '../plans.css'
 
 const DAYS = [
@@ -39,7 +45,13 @@ function formatAmount(value: number) {
 
 export function MealPlanPage() {
   const toast = useToast()
+  const bmrEditButtonRef = useRef<HTMLButtonElement>(null)
+  const restoreBmrEditFocus = useRef(false)
   const [plan, setPlan] = useState<MealPlan | null>(null)
+  const [bmrProfile, setBmrProfile] = useState<BmrProfile | null>(null)
+  const [bmrLoading, setBmrLoading] = useState(true)
+  const [bmrError, setBmrError] = useState('')
+  const [bmrEditorOpen, setBmrEditorOpen] = useState(false)
   const [selectedDay, setSelectedDay] = useState(0)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -69,9 +81,30 @@ export function MealPlanPage() {
     }
   }, [])
 
+  const loadBmr = useCallback(async () => {
+    setBmrLoading(true)
+    setBmrError('')
+    try {
+      const nextProfile = await api.mealPlan.getBmr()
+      setBmrProfile(nextProfile)
+      setBmrEditorOpen(nextProfile == null)
+    } catch (caught) {
+      setBmrError(errorMessage(caught))
+    } finally {
+      setBmrLoading(false)
+    }
+  }, [])
+
   useEffect(() => {
     void load()
-  }, [load])
+    void loadBmr()
+  }, [load, loadBmr])
+
+  useEffect(() => {
+    if (!restoreBmrEditFocus.current || bmrEditorOpen || !bmrProfile) return
+    restoreBmrEditFocus.current = false
+    bmrEditButtonRef.current?.focus()
+  }, [bmrEditorOpen, bmrProfile])
 
   const activeDay = plan?.days.find((day) => day.dayOfWeek === selectedDay) ?? null
   const settings = plan?.settings ?? null
@@ -163,6 +196,12 @@ export function MealPlanPage() {
     }
   }
 
+  function closeBmrEditor(nextProfile?: BmrProfile) {
+    if (nextProfile) setBmrProfile(nextProfile)
+    restoreBmrEditFocus.current = true
+    setBmrEditorOpen(false)
+  }
+
   return (
     <div className="page-stack plan-page meal-plan-page">
       <PageHeader
@@ -193,8 +232,25 @@ export function MealPlanPage() {
           <span><strong>{loading ? '-' : averageMeals.toFixed(1)}</strong><small>Daily average</small></span>
           <span><strong>{loading ? '-' : settings?.showCalories ? 'ON' : 'OFF'}</strong><small>Calories</small></span>
           <span><strong>{loading ? '-' : settings?.showMacros ? 'ON' : 'OFF'}</strong><small>Macros</small></span>
+          <span className="plan-summary__bmr-stat">
+            <strong>{bmrLoading ? '-' : bmrProfile ? bmrProfile.estimatedBmr.toLocaleString() : '-'}</strong>
+            <small>BMR kcal/day</small>
+            {bmrProfile && !bmrEditorOpen && (
+              <button ref={bmrEditButtonRef} type="button" className="plan-summary__stat-action" onClick={() => setBmrEditorOpen(true)} aria-label="Edit saved BMR"><Pencil size={11} /> Edit</button>
+            )}
+          </span>
         </div>
       </section>
+
+      <BmrCalculator
+        profile={bmrProfile}
+        loading={bmrLoading}
+        error={bmrError}
+        editing={bmrEditorOpen}
+        onRetry={loadBmr}
+        onSaved={(saved) => closeBmrEditor(saved)}
+        onCancel={() => closeBmrEditor()}
+      />
 
       <section className="plan-day-tabs" role="tablist" aria-label="Choose meal plan day">
         {orderedDays.map(({ value, label, short, plan: day }, index) => {
@@ -330,6 +386,362 @@ export function MealPlanPage() {
         onConfirm={() => void removeMeal()}
       />
     </div>
+  )
+}
+
+type WeightSourceMode = 'manual' | 'tracker'
+
+function BmrCalculator({
+  profile,
+  loading,
+  error,
+  editing,
+  onRetry,
+  onSaved,
+  onCancel,
+}: {
+  profile: BmrProfile | null
+  loading: boolean
+  error: string
+  editing: boolean
+  onRetry: () => Promise<void>
+  onSaved: (profile: BmrProfile) => void
+  onCancel: () => void
+}) {
+  const toast = useToast()
+  const firstFieldRef = useRef<HTMLSelectElement>(null)
+  const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState('')
+  const [bodyParts, setBodyParts] = useState<BodyPart[]>([])
+  const [weightSourcesLoading, setWeightSourcesLoading] = useState(false)
+  const [weightSourcesLoaded, setWeightSourcesLoaded] = useState(false)
+  const [weightSourceError, setWeightSourceError] = useState('')
+  const [weightSourceMode, setWeightSourceMode] = useState<WeightSourceMode>('manual')
+  const [selectedSourceId, setSelectedSourceId] = useState('')
+  const [measurementRecords, setMeasurementRecords] = useState<Measurement[]>([])
+  const [measurementRecordsLoading, setMeasurementRecordsLoading] = useState(false)
+  const [measurementRecordsError, setMeasurementRecordsError] = useState('')
+  const [selectedMeasurementId, setSelectedMeasurementId] = useState('')
+  const [sourceFallbackMessage, setSourceFallbackMessage] = useState('')
+  const [manualWeight, setManualWeight] = useState('')
+  const [manualWeightUnit, setManualWeightUnit] = useState<WeightUnit>('kg')
+  const [age, setAge] = useState('')
+  const [heightFeet, setHeightFeet] = useState('')
+  const [heightInches, setHeightInches] = useState('')
+  const [formulaSex, setFormulaSex] = useState<BmrFormulaSex | ''>('')
+
+  useEffect(() => {
+    if (!profile || !editing) return
+    populateForm(profile)
+    window.requestAnimationFrame(() => firstFieldRef.current?.focus())
+  }, [editing, profile])
+
+  const formOpen = !profile || editing
+
+  useEffect(() => {
+    if (loading || error || !formOpen) return
+    let cancelled = false
+    setWeightSourcesLoading(true)
+    setWeightSourcesLoaded(false)
+    setWeightSourceError('')
+
+    void api.bodyParts.list()
+      .then((parts) => {
+        if (!cancelled) setBodyParts(parts)
+      })
+      .catch((caught) => {
+        if (!cancelled) setWeightSourceError(errorMessage(caught))
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setWeightSourcesLoading(false)
+          setWeightSourcesLoaded(true)
+        }
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [error, formOpen, loading])
+
+  const weightSources = useMemo(
+    () => bodyParts.filter((part) => (
+      part.latestValue != null
+      && part.latestValue > 0
+      && normalizeWeightUnit(part.unit) != null
+    )),
+    [bodyParts],
+  )
+
+  useEffect(() => {
+    if (!formOpen || !weightSourcesLoaded || weightSourcesLoading || weightSourceError) return
+    if (!weightSources.length) {
+      setSelectedSourceId('')
+      if (weightSourceMode === 'tracker') fallBackToSavedWeight()
+      return
+    }
+
+    if (weightSources.some((part) => String(part.id) === selectedSourceId)) return
+    if (profile?.weightSource === 'measurement' && editing) {
+      setSelectedSourceId('')
+      fallBackToSavedWeight()
+      return
+    }
+    const preferred = weightSources.find((part) => part.name.toLowerCase().includes('weight'))
+    setSelectedSourceId(String((preferred ?? weightSources[0]).id))
+  }, [editing, formOpen, profile, selectedSourceId, weightSourceError, weightSourceMode, weightSources, weightSourcesLoaded, weightSourcesLoading])
+
+  const selectedSource = weightSources.find((part) => String(part.id) === selectedSourceId) ?? null
+
+  useEffect(() => {
+    let cancelled = false
+    setMeasurementRecords([])
+    setSelectedMeasurementId('')
+    setMeasurementRecordsError('')
+
+    if (!formOpen || weightSourceMode !== 'tracker' || !selectedSource) {
+      setMeasurementRecordsLoading(false)
+      return () => {
+        cancelled = true
+      }
+    }
+
+    setMeasurementRecordsLoading(true)
+    void api.bodyParts.measurements.list(selectedSource.id)
+      .then((records) => {
+        if (cancelled) return
+        const newestFirst = [...records].sort((a, b) => (
+          b.recordedAt.localeCompare(a.recordedAt) || b.id - a.id
+        ))
+        setMeasurementRecords(newestFirst)
+        const savedMeasurementExists = newestFirst.some((record) => String(record.id) === selectedMeasurementId)
+        if (savedMeasurementExists) {
+          setSelectedMeasurementId(selectedMeasurementId)
+        } else if (
+          profile?.weightSource === 'measurement'
+          && editing
+          && profile.bodyPartId === selectedSource.id
+          && profile.measurementId != null
+        ) {
+          fallBackToSavedWeight()
+        } else {
+          setSelectedMeasurementId(String(newestFirst[0]?.id ?? ''))
+        }
+      })
+      .catch((caught) => {
+        if (!cancelled) setMeasurementRecordsError(errorMessage(caught))
+      })
+      .finally(() => {
+        if (!cancelled) setMeasurementRecordsLoading(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [editing, formOpen, profile, selectedSource, weightSourceMode])
+
+  const selectedMeasurement = measurementRecords.find((record) => (
+    record.bodyPartId === selectedSource?.id && String(record.id) === selectedMeasurementId
+  )) ?? null
+  const selectedSourceUnit = selectedSource ? normalizeWeightUnit(selectedSource.unit) : null
+  const trackerWeightKg = selectedMeasurement && selectedSourceUnit
+    ? weightToKilograms(selectedMeasurement.value, selectedSourceUnit)
+    : Number.NaN
+  const manualWeightValue = manualWeight.trim() ? Number(manualWeight) : Number.NaN
+  const manualWeightKg = weightToKilograms(manualWeightValue, manualWeightUnit)
+  const weightKg = weightSourceMode === 'tracker' ? trackerWeightKg : manualWeightKg
+  const heightCm = heightToCentimeters(
+    heightFeet.trim() ? Number(heightFeet) : Number.NaN,
+    heightInches.trim() ? Number(heightInches) : Number.NaN,
+  )
+  const estimate = formulaSex
+    ? calculateBmr({
+        age: age.trim() ? Number(age) : Number.NaN,
+        heightCm: heightCm ?? Number.NaN,
+        sex: formulaSex,
+        weightKg,
+      })
+    : null
+  const hasAllInputs = Boolean(
+    formulaSex
+    && age.trim()
+    && heightFeet.trim()
+    && heightInches.trim()
+    && (weightSourceMode === 'tracker' ? selectedMeasurement : manualWeight.trim()),
+  )
+
+  function populateForm(nextProfile: BmrProfile) {
+    setAge(String(nextProfile.age))
+    setFormulaSex(nextProfile.sex)
+    setHeightFeet(String(nextProfile.heightFeet))
+    setHeightInches(String(nextProfile.heightInches))
+    setManualWeight(String(nextProfile.weightValue))
+    setManualWeightUnit(nextProfile.weightUnit)
+    setWeightSourceMode(nextProfile.weightSource === 'measurement' ? 'tracker' : 'manual')
+    setSelectedSourceId(nextProfile.bodyPartId == null ? '' : String(nextProfile.bodyPartId))
+    setSelectedMeasurementId(nextProfile.measurementId == null ? '' : String(nextProfile.measurementId))
+    setSourceFallbackMessage('')
+    setSaveError('')
+  }
+
+  function fallBackToSavedWeight() {
+    if (!profile) {
+      setWeightSourceMode('manual')
+      return
+    }
+    setWeightSourceMode('manual')
+    setManualWeight(String(profile.weightValue))
+    setManualWeightUnit(profile.weightUnit)
+    setSourceFallbackMessage('The original saved check-in is no longer available. Its saved weight has been kept as a manual entry.')
+  }
+
+  async function saveProfile(event: FormEvent) {
+    event.preventDefault()
+    if (!formulaSex || estimate == null) return
+
+    const base = {
+      age: Number(age),
+      sex: formulaSex,
+      heightFeet: Number(heightFeet),
+      heightInches: Number(heightInches),
+    }
+    let input: BmrProfileInput
+    if (weightSourceMode === 'tracker') {
+      if (!selectedSource || !selectedMeasurement) return
+      input = {
+        ...base,
+        weightSource: 'measurement',
+        bodyPartId: selectedSource.id,
+        measurementId: selectedMeasurement.id,
+      }
+    } else {
+      input = {
+        ...base,
+        weightSource: 'manual',
+        weightValue: Number(manualWeight),
+        weightUnit: manualWeightUnit,
+      }
+    }
+
+    setSaving(true)
+    setSaveError('')
+    try {
+      const saved = await api.mealPlan.saveBmr(input)
+      onSaved(saved)
+      toast(profile ? 'BMR updated.' : 'BMR saved.')
+    } catch (caught) {
+      setSaveError(errorMessage(caught))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  if (profile && !editing && !loading && !error) return null
+
+  return (
+    <section className="panel bmr-calculator" aria-labelledby="bmr-calculator-title">
+      <header className="bmr-calculator__header">
+        <span className="bmr-calculator__icon"><Calculator size={22} /></span>
+        <div>
+          <span className="eyebrow">CALORIE BASELINE</span>
+          <h2 id="bmr-calculator-title">{profile ? 'Edit BMR' : 'BMR calculator'}</h2>
+          <p>Estimate how much energy your body uses each day while at rest.</p>
+        </div>
+      </header>
+
+      {loading ? (
+        <div className="bmr-profile-state" role="status"><LoaderCircle className="spin" size={21} /><span>Loading saved BMR...</span></div>
+      ) : error ? (
+        <div className="bmr-profile-state"><ErrorNotice message={error} onRetry={() => void onRetry()} /></div>
+      ) : (
+        <form className="bmr-calculator__form" onSubmit={(event) => void saveProfile(event)}>
+          <div className="bmr-calculator__body">
+            <div className="bmr-calculator__controls">
+              <div className="bmr-calculator__profile-fields">
+                <label className="field">
+                  <span>Sex used by formula</span>
+                  <select ref={firstFieldRef} value={formulaSex} onChange={(event) => setFormulaSex(event.target.value as BmrFormulaSex | '')} required>
+                    <option value="">Select</option>
+                    <option value="female">Female</option>
+                    <option value="male">Male</option>
+                  </select>
+                </label>
+                <label className="field">
+                  <span>Age</span>
+                  <span className="input-with-suffix"><input type="number" inputMode="numeric" min="18" max="120" step="1" value={age} onChange={(event) => setAge(event.target.value)} placeholder="Years" autoComplete="off" required /><b>years</b></span>
+                </label>
+                <fieldset className="bmr-height-fields">
+                  <legend>Height</legend>
+                  <label className="field"><span>Feet</span><span className="input-with-suffix"><input type="number" inputMode="numeric" min="3" max="9" step="1" value={heightFeet} onChange={(event) => setHeightFeet(event.target.value)} placeholder="5" autoComplete="off" required /><b>ft</b></span></label>
+                  <label className="field"><span>Inches</span><span className="input-with-suffix"><input type="number" inputMode="decimal" min="0" max="11.99" step="0.1" value={heightInches} onChange={(event) => setHeightInches(event.target.value)} placeholder="10" autoComplete="off" required /><b>in</b></span></label>
+                </fieldset>
+              </div>
+
+              <fieldset className="bmr-weight-source">
+                <legend>Weight source</legend>
+                <div className="bmr-weight-source__choices">
+                  <label className={`bmr-source-choice ${weightSourceMode === 'tracker' ? 'is-selected' : ''} ${weightSourcesLoaded && !weightSourcesLoading && !weightSources.length ? 'is-disabled' : ''}`}>
+                    <input type="radio" name="bmr-weight-source" value="tracker" checked={weightSourceMode === 'tracker'} disabled={weightSourcesLoaded && !weightSourcesLoading && !weightSources.length} onChange={() => { setWeightSourceMode('tracker'); setSourceFallbackMessage('') }} />
+                    <Scale size={18} />
+                    <span><strong>Measurements tracker</strong><small>Choose a saved tracker and check-in.</small></span>
+                  </label>
+                  <label className={`bmr-source-choice ${weightSourceMode === 'manual' ? 'is-selected' : ''}`}>
+                    <input type="radio" name="bmr-weight-source" value="manual" checked={weightSourceMode === 'manual'} onChange={() => { setWeightSourceMode('manual'); setSourceFallbackMessage('') }} />
+                    <Pencil size={18} />
+                    <span><strong>Enter manually</strong><small>Save a weight without linking a check-in.</small></span>
+                  </label>
+                </div>
+
+                {weightSourceMode === 'tracker' ? (
+                  <div className="bmr-weight-source__input bmr-weight-source__input--tracker">
+                    <label className="field">
+                      <span>Weight tracker</span>
+                      <select value={selectedSourceId} disabled={weightSourcesLoading || !weightSources.length} onChange={(event) => { setSelectedSourceId(event.target.value); setSelectedMeasurementId('') }}>
+                        {weightSourcesLoading && <option value="">Loading measurements...</option>}
+                        {!weightSourcesLoading && !weightSources.length && <option value="">No compatible measurements</option>}
+                        {weightSources.map((part) => <option value={part.id} key={part.id}>{part.name} - latest {formatAmount(part.latestValue ?? 0)} {part.unit}</option>)}
+                      </select>
+                    </label>
+                    <label className="field">
+                      <span>Saved check-in</span>
+                      <select value={selectedMeasurementId} disabled={measurementRecordsLoading || !measurementRecords.length} onChange={(event) => setSelectedMeasurementId(event.target.value)}>
+                        {measurementRecordsLoading && <option value="">Loading check-ins...</option>}
+                        {!measurementRecordsLoading && !measurementRecords.length && <option value="">No check-ins available</option>}
+                        {measurementRecords.map((record) => <option value={record.id} key={record.id}>{formatDate(record.recordedAt)} - {formatAmount(record.value)} {selectedSource?.unit}</option>)}
+                      </select>
+                      <small>The newest check-in is selected automatically.</small>
+                    </label>
+                  </div>
+                ) : (
+                  <div className="bmr-weight-source__input bmr-weight-source__input--manual">
+                    <label className="field"><span>Weight</span><input type="number" inputMode="decimal" min="1" step="0.1" value={manualWeight} onChange={(event) => setManualWeight(event.target.value)} placeholder="Enter weight" autoComplete="off" required /></label>
+                    <label className="field"><span>Unit</span><select value={manualWeightUnit} onChange={(event) => setManualWeightUnit(event.target.value as WeightUnit)}><option value="kg">kg</option><option value="lb">lb</option><option value="st">st (decimal)</option></select></label>
+                  </div>
+                )}
+
+                {weightSourcesLoaded && !weightSourcesLoading && !weightSources.length && !weightSourceError && <p className="bmr-weight-source__message">No saved measurement has a latest value in kg, lb, or stone yet. Manual entry is ready to use.</p>}
+                {weightSourceError && <p className="bmr-weight-source__message bmr-weight-source__message--error" role="alert">Saved measurements could not be loaded. Enter your weight manually instead.</p>}
+                {measurementRecordsError && <p className="bmr-weight-source__message bmr-weight-source__message--error" role="alert">That tracker's check-ins could not be loaded. Choose another tracker or enter your weight manually.</p>}
+                {sourceFallbackMessage && <p className="bmr-weight-source__message" role="status">{sourceFallbackMessage}</p>}
+              </fieldset>
+            </div>
+
+            <output className={`bmr-result ${estimate != null ? 'has-estimate' : ''}`} aria-live="polite">
+              <span>Estimated BMR</span>
+              <strong>{estimate == null ? '—' : estimate.toLocaleString()} <small>kcal/day</small></strong>
+              <p>{estimate == null ? (hasAllInputs ? 'Check the supported ranges: age 18-120, height 3-9 ft with 0-11.99 in, and weight 20-500 kg.' : 'Complete the details to see your estimate.') : 'Save this estimate to keep it on your meal planner.'}</p>
+            </output>
+          </div>
+
+          {saveError && <div className="form-alert bmr-calculator__error" role="alert">{saveError}</div>}
+          <div className="bmr-calculator__actions">
+            {profile && <Button type="button" variant="secondary" disabled={saving} onClick={onCancel}>Cancel</Button>}
+            <Button type="submit" busy={saving} disabled={estimate == null || (weightSourceMode === 'tracker' && !selectedMeasurement)}>{profile ? 'Save changes' : 'Save BMR'}</Button>
+          </div>
+          <p className="bmr-calculator__note"><Info size={15} />Calculated with the Mifflin–St Jeor equation. This is an estimate of resting energy use, not your total daily calorie requirement.</p>
+        </form>
+      )}
+    </section>
   )
 }
 

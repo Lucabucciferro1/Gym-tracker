@@ -211,7 +211,7 @@ describe('private data export', () => {
     const memberExport = await member.get('/api/export').expect(200);
     expect(memberExport.headers['content-disposition']).toMatch(/^attachment; filename="forge-export-\d{4}-\d{2}-\d{2}\.json"$/);
     expect(memberExport.body.data).toMatchObject({
-      formatVersion: 2,
+      formatVersion: 3,
       user: { username: 'Member', role: 'user' },
       bodyParts: [{
         name: 'Exported waist',

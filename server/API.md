@@ -108,6 +108,8 @@ Every account has exactly seven seeded workout days, initially named `Rest day`.
 | --- | --- | --- | --- |
 | GET | `/api/meal-plan` | - | `{ settings, days }` |
 | PUT | `/api/meal-plan/settings` | any of the settings fields | `{ settings }` |
+| GET | `/api/meal-plan/bmr` | - | `{ bmr }`; `bmr` is the saved profile or `null` |
+| PUT | `/api/meal-plan/bmr` | BMR profile input | `{ bmr }` |
 | POST | `/api/meal-plan/meals` | meal fields | `{ meal }` (201) |
 | PATCH | `/api/meal-plan/meals/:mealId` | any meal fields | `{ meal }` |
 | DELETE | `/api/meal-plan/meals/:mealId` | - | `{ success: true }` |
@@ -124,6 +126,20 @@ updatedAt }`.
 where `totals` is `{ calories, protein, carbs, fat }`; missing nutrition values contribute
 zero. Meals are ordered by `sortOrder`, then ID. New accounts start with calories and macros
 visible, null targets, and no meals.
+
+A BMR profile input contains `{ age, sex, heightFeet, heightInches, weightSource }`. `age`
+is an integer from 18 through 120, `sex` is `female` or `male`, feet are an integer from 3
+through 9, inches are at least 0 and less than 12, and the combined height must be 100-275 cm.
+For `weightSource: "manual"`, also send `{ weightValue, weightUnit }`, where the unit is
+`kg`, `lb`, or decimal `st`. For `weightSource: "measurement"`, send `{ bodyPartId,
+measurementId }`; the server verifies that the record belongs to the signed-in user and uses
+a supported weight unit. Converted weight must be 20-500 kg.
+
+The server calculates the Mifflin-St Jeor result and stores a snapshot of the chosen weight.
+The returned BMR includes the submitted profile fields plus `{ weightValue, weightUnit,
+bodyPartId, measurementId, sourceName, sourceRecordedAt, estimatedBmr, createdAt, updatedAt }`.
+Editing or deleting the original measurement does not silently change a saved result. BMR
+profiles are owner-only and are never included in shared meal-plan projections.
 
 ## Sharing progress
 
@@ -184,8 +200,8 @@ meal-plan content remain private.
 
 ## Export, deletion, and health
 
-- `GET /api/export` downloads format version 2 for the signed-in user as
-  `{ formatVersion, exportedAt, user, bodyParts, exercises, workoutPlan, mealPlan, sharing }`.
+- `GET /api/export` downloads format version 3 for the signed-in user as
+  `{ formatVersion, exportedAt, user, bodyParts, exercises, workoutPlan, mealPlan, bmrProfile, sharing }`.
   Body parts and exercises retain the user's saved resource order and include `sortOrder`.
   `sharing` contains only the user's outgoing/incoming permission metadata, never another
   user's progress records.
@@ -193,8 +209,8 @@ meal-plan content remain private.
 
 The initial administrator and every invited account receive independent default body
 parts, exercises, seven workout days, and meal settings. Deleting an account cascades through
-its sessions, body data, lift data, workout plan, meal plan, and any incoming or outgoing
-sharing grants.
+its sessions, body data, lift data, workout plan, meal plan, BMR profile, and any incoming or
+outgoing sharing grants.
 
 Every resource query includes the signed-in user's ID. Nested-record routes also verify
 ownership of their parent. In production the API serves `dist/` and falls back to

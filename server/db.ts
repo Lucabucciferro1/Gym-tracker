@@ -328,6 +328,43 @@ export async function initializeDatabase(database: Database): Promise<void> {
       CHECK (fat_target IS NULL OR fat_target >= 0)
     );
 
+    CREATE TABLE IF NOT EXISTS bmr_profiles (
+      user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      age INTEGER NOT NULL CHECK (age BETWEEN 18 AND 120),
+      sex TEXT NOT NULL CHECK (sex IN ('female', 'male')),
+      height_feet INTEGER NOT NULL CHECK (height_feet BETWEEN 3 AND 9),
+      height_inches REAL NOT NULL CHECK (height_inches >= 0 AND height_inches < 12),
+      weight_source TEXT NOT NULL CHECK (weight_source IN ('manual', 'measurement')),
+      weight_value REAL NOT NULL CHECK (weight_value > 0),
+      weight_unit TEXT NOT NULL CHECK (weight_unit IN ('kg', 'lb', 'st')),
+      body_part_id INTEGER,
+      measurement_id INTEGER,
+      source_name TEXT,
+      source_recorded_at TEXT,
+      estimated_bmr INTEGER NOT NULL CHECK (estimated_bmr > 0),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      CHECK ((((height_feet * 12) + height_inches) * 2.54) BETWEEN 100 AND 275),
+      CHECK (
+        (weight_unit = 'kg' AND weight_value BETWEEN 20 AND 500)
+        OR (weight_unit = 'lb' AND (weight_value * 0.45359237) BETWEEN 20 AND 500)
+        OR (weight_unit = 'st' AND (weight_value * 6.35029318) BETWEEN 20 AND 500)
+      ),
+      CHECK (
+        (weight_source = 'manual'
+          AND body_part_id IS NULL
+          AND measurement_id IS NULL
+          AND source_name IS NULL
+          AND source_recorded_at IS NULL)
+        OR
+        (weight_source = 'measurement'
+          AND body_part_id IS NOT NULL
+          AND measurement_id IS NOT NULL
+          AND source_name IS NOT NULL
+          AND source_recorded_at IS NOT NULL)
+      )
+    );
+
     CREATE TABLE IF NOT EXISTS meals (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,

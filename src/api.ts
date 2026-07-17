@@ -9,6 +9,8 @@ import type {
   Meal,
   MealPlan,
   MealPlanSettings,
+  BmrProfile,
+  BmrProfileInput,
   ProgressShare,
   SharedProgress,
   SharingOverview,
@@ -236,6 +238,13 @@ export const api = {
   },
   mealPlan: {
     get: () => request<MealPlan>('/api/meal-plan'),
+    getBmr: () => request<{ bmr: BmrProfile | null }>('/api/meal-plan/bmr')
+      .then((result) => result.bmr),
+    saveBmr: (input: BmrProfileInput) =>
+      request<{ bmr: BmrProfile }>('/api/meal-plan/bmr', {
+        method: 'PUT',
+        body: json(input),
+      }).then((result) => result.bmr),
     updateSettings: (input: Partial<MealPlanSettings>) =>
       request<{ settings: MealPlanSettings }>('/api/meal-plan/settings', {
         method: 'PUT',

@@ -106,6 +106,37 @@
   white-space: nowrap;
 }
 
+.plan-summary__stats > .plan-summary__bmr-stat {
+  min-width: 122px;
+}
+
+.plan-summary__stat-action {
+  display: inline-flex;
+  min-height: 24px;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  margin: 0;
+  padding: 2px 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--primary);
+  font: inherit;
+  font-size: 9px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.plan-summary__stat-action:hover {
+  background: var(--primary-soft);
+}
+
+.plan-summary__stat-action:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 1px;
+}
+
 .plan-day-tabs {
   display: grid;
   grid-template-columns: repeat(7, minmax(108px, 1fr));
@@ -836,6 +867,312 @@
   transform: translateY(-50%);
 }
 
+.bmr-calculator {
+  overflow: hidden;
+  padding: 0;
+}
+
+.bmr-calculator__header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 20px 22px;
+  border-bottom: 1px solid var(--border-subtle);
+  background:
+    radial-gradient(circle at 96% 15%, rgba(185, 219, 115, 0.14), transparent 15rem),
+    #fff;
+}
+
+.bmr-calculator__header > div {
+  min-width: 0;
+  flex: 1;
+}
+
+.bmr-calculator__icon {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 13px;
+  background: #edf4e7;
+  color: var(--primary);
+}
+
+.bmr-calculator__header h2 {
+  margin: 2px 0 3px;
+  font-size: 17px;
+  letter-spacing: -0.025em;
+}
+
+.bmr-calculator__header p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.bmr-calculator__body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(245px, 0.3fr);
+  align-items: stretch;
+  gap: 18px;
+  padding: 20px 22px 16px;
+}
+
+.bmr-calculator__controls {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.bmr-profile-state {
+  min-height: 150px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  padding: 24px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.bmr-profile-state > .error-notice {
+  width: 100%;
+}
+
+.bmr-calculator__profile-fields {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 11px;
+}
+
+.bmr-height-fields {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.bmr-height-fields > legend {
+  grid-column: 1 / -1;
+  margin-bottom: -5px;
+  color: var(--text-soft);
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.bmr-weight-source {
+  min-width: 0;
+  margin: 0;
+  padding: 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 13px;
+  background: #fbfcf9;
+}
+
+.bmr-weight-source > legend {
+  padding: 0 6px;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.bmr-weight-source__choices {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+}
+
+.bmr-source-choice {
+  position: relative;
+  display: grid;
+  min-width: 0;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  padding: 11px 12px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--surface);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: border-color 150ms ease, box-shadow 150ms ease, background 150ms ease;
+}
+
+.bmr-source-choice > input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.bmr-source-choice > svg {
+  color: var(--primary);
+}
+
+.bmr-source-choice > span {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.bmr-source-choice strong {
+  color: var(--text);
+  font-size: 11px;
+}
+
+.bmr-source-choice small {
+  color: var(--text-muted);
+  font-size: 9.5px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+.bmr-source-choice.is-selected {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+  box-shadow: inset 0 0 0 1px rgba(55, 107, 73, 0.08);
+}
+
+.bmr-source-choice:focus-within {
+  box-shadow: 0 0 0 3px rgba(55, 107, 73, 0.18);
+}
+
+.bmr-source-choice.is-disabled {
+  opacity: 0.52;
+  cursor: not-allowed;
+}
+
+.bmr-weight-source__input {
+  margin-top: 12px;
+}
+
+.bmr-weight-source__input--tracker {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.bmr-weight-source__input--manual {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 105px;
+  gap: 10px;
+}
+
+.bmr-weight-source__message {
+  margin: 10px 0 0;
+  color: var(--text-muted);
+  font-size: 9.5px;
+  line-height: 1.5;
+}
+
+.bmr-weight-source__message--error {
+  color: var(--danger);
+}
+
+.bmr-result {
+  display: flex;
+  min-height: 205px;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  padding: 24px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 14px;
+  background: #f5f8f2;
+  text-align: center;
+  transition: color 180ms ease, background 180ms ease;
+}
+
+.bmr-result > span {
+  color: var(--primary);
+  font-size: 9.5px;
+  font-weight: 850;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.bmr-result strong {
+  margin: 10px 0 8px;
+  color: var(--text);
+  font-size: clamp(28px, 3vw, 40px);
+  letter-spacing: -0.05em;
+  line-height: 1;
+}
+
+.bmr-result strong small {
+  font-size: 11px;
+  letter-spacing: 0;
+}
+
+.bmr-result p {
+  max-width: 210px;
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.bmr-result.has-estimate {
+  border-color: #1d3826;
+  background: #1d3826;
+}
+
+.bmr-result.has-estimate > span {
+  color: var(--lime);
+}
+
+.bmr-result.has-estimate strong,
+.bmr-result.has-estimate p {
+  color: #fff;
+}
+
+.bmr-result.has-estimate p {
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.bmr-calculator__error {
+  margin: 0 22px 14px;
+}
+
+.bmr-calculator__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 9px;
+  padding: 0 22px 16px;
+}
+
+.bmr-calculator__note {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin: 0;
+  padding: 0 22px 18px;
+  color: var(--text-muted);
+  font-size: 9.5px;
+  line-height: 1.5;
+}
+
+.bmr-calculator__note svg {
+  flex: 0 0 auto;
+  color: var(--primary);
+}
+
+@media (max-width: 920px) {
+  .bmr-calculator__body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .bmr-result {
+    min-height: 155px;
+  }
+}
+
 @media (max-width: 1180px) {
   .plan-summary {
     align-items: flex-start;
@@ -909,6 +1246,10 @@
   .plan-summary__stats > span {
     min-width: 84px;
     padding: 11px 10px;
+  }
+
+  .plan-summary__stats > .plan-summary__bmr-stat {
+    min-width: 112px;
   }
 
   .plan-summary__stats strong {
@@ -1013,11 +1354,42 @@
   .plan-target-grid {
     margin-left: 0;
   }
+
+  .bmr-calculator__header,
+  .bmr-calculator__body {
+    padding-right: 18px;
+    padding-left: 18px;
+  }
+
+  .bmr-calculator__profile-fields,
+  .bmr-weight-source__choices,
+  .bmr-weight-source__input--tracker {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .bmr-calculator__note {
+    padding-right: 18px;
+    padding-left: 18px;
+  }
+
+  .bmr-calculator__actions {
+    padding-right: 18px;
+    padding-left: 18px;
+  }
+
+  .bmr-calculator__error {
+    margin-right: 18px;
+    margin-left: 18px;
+  }
 }
 
 @media (max-width: 470px) {
   .plan-summary__stats > span {
     min-width: 78px;
+  }
+
+  .plan-summary__stats > .plan-summary__bmr-stat {
+    min-width: 108px;
   }
 
   .nutrition-total-grid {
@@ -1039,5 +1411,42 @@
   .meal-card__nutrition > span {
     min-width: 57px;
     padding-inline: 8px;
+  }
+
+  .bmr-calculator__header {
+    align-items: flex-start;
+    flex-wrap: wrap;
+    padding: 17px 15px;
+  }
+
+  .bmr-calculator__body {
+    padding: 16px 15px 13px;
+  }
+
+  .bmr-weight-source {
+    padding: 12px;
+  }
+
+  .bmr-weight-source__input--manual {
+    grid-template-columns: minmax(0, 1fr) 92px;
+  }
+
+  .bmr-calculator__note {
+    padding: 0 15px 16px;
+  }
+
+  .bmr-calculator__actions {
+    align-items: stretch;
+    flex-direction: column-reverse;
+    padding: 0 15px 14px;
+  }
+
+  .bmr-calculator__actions .button {
+    width: 100%;
+  }
+
+  .bmr-calculator__error {
+    margin-right: 15px;
+    margin-left: 15px;
   }
 }

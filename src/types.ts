@@ -161,6 +161,45 @@ export interface MealPlan {
   days: MealPlanDay[]
 }
 
+export type BmrFormulaSex = 'female' | 'male'
+
+export type BmrWeightUnit = 'kg' | 'lb' | 'st'
+
+export type BmrWeightSource = 'manual' | 'measurement'
+
+interface BmrProfileInputBase {
+  age: number
+  sex: BmrFormulaSex
+  heightFeet: number
+  heightInches: number
+}
+
+export type BmrProfileInput = BmrProfileInputBase & (
+  | {
+      weightSource: 'manual'
+      weightValue: number
+      weightUnit: BmrWeightUnit
+    }
+  | {
+      weightSource: 'measurement'
+      bodyPartId: number
+      measurementId: number
+    }
+)
+
+export interface BmrProfile extends BmrProfileInputBase {
+  weightSource: BmrWeightSource
+  weightValue: number
+  weightUnit: BmrWeightUnit
+  bodyPartId: number | null
+  measurementId: number | null
+  sourceName: string | null
+  sourceRecordedAt: string | null
+  estimatedBmr: number
+  createdAt: string
+  updatedAt: string
+}
+
 export interface ShareUser {
   id: number
   username: string

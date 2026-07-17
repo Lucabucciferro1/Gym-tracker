@@ -181,6 +181,18 @@ describe('weekly meal plan', () => {
         exercises: [{ name: 'Squat', sets: 5, reps: '5', notes: null }],
       })
       .expect(200);
+    await member.agent
+      .put('/api/meal-plan/bmr')
+      .send({
+        age: 34,
+        sex: 'female',
+        heightFeet: 5,
+        heightInches: 5,
+        weightSource: 'manual',
+        weightValue: 65,
+        weightUnit: 'kg',
+      })
+      .expect(200);
 
     await admin.patch(`/api/meal-plan/meals/${meal.body.data.meal.id}`).send({ calories: 1 }).expect(404);
     await admin.delete(`/api/meal-plan/meals/${meal.body.data.meal.id}`).expect(404);
@@ -191,7 +203,244 @@ describe('weekly meal plan', () => {
     expect(await database.prepare('SELECT COUNT(*) AS count FROM workout_exercises').get()).toEqual({ count: 0 });
     expect(await database.prepare('SELECT COUNT(*) AS count FROM meal_plan_settings WHERE user_id = ?').get(member.user.id))
       .toEqual({ count: 0 });
+    expect(await database.prepare('SELECT COUNT(*) AS count FROM bmr_profiles WHERE user_id = ?').get(member.user.id))
+      .toEqual({ count: 0 });
     expect(await database.prepare('SELECT COUNT(*) AS count FROM meals WHERE user_id = ?').get(member.user.id))
       .toEqual({ count: 0 });
+  });
+});
+
+describe('saved BMR profile', () => {
+  it('requires authentication, upserts a manual profile, and includes it in the private export', async () => {
+    await request(app).get('/api/meal-plan/bmr').expect(401);
+    await request(app)
+      .put('/api/meal-plan/bmr')
+      .send({
+        age: 30,
+        sex: 'male',
+        heightFeet: 5,
+        heightInches: 10,
+        weightSource: 'manual',
+        weightValue: 80,
+        weightUnit: 'kg',
+      })
+      .expect(401);
+
+    const { agent: admin } = await setupAdmin();
+    await admin
+      .get('/api/meal-plan/bmr')
+      .expect(200)
+      .expect(({ body }: { body: { data: unknown } }) => {
+        expect(body.data).toEqual({ bmr: null });
+      });
+
+    const saved = await admin
+      .put('/api/meal-plan/bmr')
+      .send({
+        age: 30,
+        sex: 'male',
+        heightFeet: 5,
+        heightInches: 10,
+        weightSource: 'manual',
+        weightValue: 80,
+        weightUnit: 'kg',
+      })
+      .expect(200);
+    expect(saved.body.data.bmr).toEqual({
+      age: 30,
+      sex: 'male',
+      heightFeet: 5,
+      heightInches: 10,
+      weightSource: 'manual',
+      weightValue: 80,
+      weightUnit: 'kg',
+      bodyPartId: null,
+      measurementId: null,
+      sourceName: null,
+      sourceRecordedAt: null,
+      estimatedBmr: 1766,
+      createdAt: expect.any(String),
+      updatedAt: expect.any(String),
+    });
+
+    const fetched = await admin.get('/api/meal-plan/bmr').expect(200);
+    expect(fetched.body.data.bmr).toEqual(saved.body.data.bmr);
+
+    const updated = await admin
+      .put('/api/meal-plan/bmr')
+      .send({
+        age: 31,
+        sex: 'male',
+        heightFeet: 5,
+        heightInches: 10,
+        weightSource: 'manual',
+        weightValue: 176.3698,
+        weightUnit: 'lb',
+      })
+      .expect(200);
+    expect(updated.body.data.bmr).toMatchObject({
+      age: 31,
+      weightValue: 176.3698,
+      weightUnit: 'lb',
+      estimatedBmr: 1761,
+      createdAt: saved.body.data.bmr.createdAt,
+    });
+
+    const exported = await admin.get('/api/export').expect(200);
+    expect(exported.body.data).toMatchObject({
+      formatVersion: 3,
+      bmrProfile: updated.body.data.bmr,
+    });
+
+    await admin
+      .put('/api/meal-plan/bmr')
+      .send({
+        age: 31,
+        sex: 'male',
+        heightFeet: 5,
+        heightInches: 10,
+        weightSource: 'manual',
+        weightValue: 80,
+        weightUnit: 'kg',
+        bodyPartId: 1,
+      })
+      .expect(400);
+    await admin
+      .put('/api/meal-plan/bmr')
+      .send({
+        age: 31,
+        sex: 'male',
+        heightFeet: 3,
+        heightInches: 0,
+        weightSource: 'manual',
+        weightValue: 80,
+        weightUnit: 'kg',
+      })
+      .expect(400);
+  });
+
+  it('validates measurement ownership and units while retaining a stable source snapshot', async () => {
+    const { agent: admin } = await setupAdmin();
+    const member = await inviteAndActivate(admin, 'Member');
+    const adminParts = await admin.get('/api/body-parts').expect(200);
+    const bodyWeight = adminParts.body.data.bodyParts.find(
+      (part: { name: string }) => part.name === 'Body Weight',
+    );
+    const chest = adminParts.body.data.bodyParts.find(
+      (part: { name: string }) => part.name === 'Chest',
+    );
+    const weightMeasurement = await admin
+      .post(`/api/body-parts/${bodyWeight.id}/measurements`)
+      .send({ value: 80, recordedAt: '2026-07-15' })
+      .expect(201);
+
+    const saved = await admin
+      .put('/api/meal-plan/bmr')
+      .send({
+        age: 30,
+        sex: 'female',
+        heightFeet: 5,
+        heightInches: 6,
+        weightSource: 'measurement',
+        bodyPartId: bodyWeight.id,
+        measurementId: weightMeasurement.body.data.measurement.id,
+      })
+      .expect(200);
+    expect(saved.body.data.bmr).toMatchObject({
+      age: 30,
+      sex: 'female',
+      heightFeet: 5,
+      heightInches: 6,
+      weightSource: 'measurement',
+      weightValue: 80,
+      weightUnit: 'kg',
+      bodyPartId: bodyWeight.id,
+      measurementId: weightMeasurement.body.data.measurement.id,
+      sourceName: 'Body Weight',
+      sourceRecordedAt: weightMeasurement.body.data.measurement.recordedAt,
+      estimatedBmr: 1537,
+    });
+
+    await admin
+      .patch(`/api/body-parts/${bodyWeight.id}/measurements/${weightMeasurement.body.data.measurement.id}`)
+      .send({ value: 100 })
+      .expect(200);
+    const stable = await admin.get('/api/meal-plan/bmr').expect(200);
+    expect(stable.body.data.bmr).toEqual(saved.body.data.bmr);
+    await admin
+      .delete(`/api/body-parts/${bodyWeight.id}/measurements/${weightMeasurement.body.data.measurement.id}`)
+      .expect(200);
+    const stableAfterDeletion = await admin.get('/api/meal-plan/bmr').expect(200);
+    expect(stableAfterDeletion.body.data.bmr).toEqual(saved.body.data.bmr);
+
+    const unsupportedMeasurement = await admin
+      .post(`/api/body-parts/${chest.id}/measurements`)
+      .send({ value: 95 })
+      .expect(201);
+    await admin
+      .put('/api/meal-plan/bmr')
+      .send({
+        age: 30,
+        sex: 'female',
+        heightFeet: 5,
+        heightInches: 6,
+        weightSource: 'measurement',
+        bodyPartId: chest.id,
+        measurementId: unsupportedMeasurement.body.data.measurement.id,
+      })
+      .expect(400)
+      .expect(({ body }: { body: unknown }) => {
+        expect(body).toMatchObject({ error: { code: 'BMR_WEIGHT_UNIT_UNSUPPORTED' } });
+      });
+
+    const memberParts = await member.agent.get('/api/body-parts').expect(200);
+    const memberWeight = memberParts.body.data.bodyParts.find(
+      (part: { name: string }) => part.name === 'Body Weight',
+    );
+    const memberMeasurement = await member.agent
+      .post(`/api/body-parts/${memberWeight.id}/measurements`)
+      .send({ value: 70 })
+      .expect(201);
+    await admin
+      .put('/api/meal-plan/bmr')
+      .send({
+        age: 30,
+        sex: 'female',
+        heightFeet: 5,
+        heightInches: 6,
+        weightSource: 'measurement',
+        bodyPartId: memberWeight.id,
+        measurementId: memberMeasurement.body.data.measurement.id,
+      })
+      .expect(404)
+      .expect(({ body }: { body: unknown }) => {
+        expect(body).toMatchObject({ error: { code: 'BMR_MEASUREMENT_NOT_FOUND' } });
+      });
+  });
+
+  it('keeps a saved BMR profile out of friend meal-plan sharing', async () => {
+    const owner = await setupAdmin();
+    const viewer = await inviteAndActivate(owner.agent, 'Viewer');
+    await owner.agent
+      .put('/api/meal-plan/bmr')
+      .send({
+        age: 42,
+        sex: 'male',
+        heightFeet: 6,
+        heightInches: 1,
+        weightSource: 'manual',
+        weightValue: 90,
+        weightUnit: 'kg',
+      })
+      .expect(200);
+    await owner.agent
+      .post('/api/sharing')
+      .send({ viewerUserId: viewer.user.id, shareMeals: true })
+      .expect(201);
+
+    const shared = await viewer.agent.get(`/api/shared/${owner.user.id}`).expect(200);
+    expect(shared.body.data).not.toHaveProperty('bmr');
+    expect(shared.body.data.mealPlan).not.toHaveProperty('bmr');
+    expect(JSON.stringify(shared.body)).not.toContain('estimatedBmr');
   });
 });

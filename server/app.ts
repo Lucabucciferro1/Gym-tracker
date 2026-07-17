@@ -1399,6 +1399,69 @@ function registerWorkoutPlanRoutes(app: Express, database: Database): void {
   });
 }
 
+type BmrSex = 'female' | 'male';
+type BmrWeightSource = 'manual' | 'measurement';
+type BmrWeightUnit = 'kg' | 'lb' | 'st';
+
+interface BmrWeightSnapshot {
+  weightSource: BmrWeightSource;
+  weightValue: number;
+  weightUnit: BmrWeightUnit;
+  bodyPartId: number | null;
+  measurementId: number | null;
+  sourceName: string | null;
+  sourceRecordedAt: string | null;
+}
+
+function normalizeBmrWeightUnit(unit: string): BmrWeightUnit | null {
+  const normalized = unit.trim().toLowerCase().replace(/[.\s_-]/g, '');
+  if (['kg', 'kgs', 'kilogram', 'kilograms', 'kilogramme', 'kilogrammes'].includes(normalized)) {
+    return 'kg';
+  }
+  if (['lb', 'lbs', 'pound', 'pounds'].includes(normalized)) return 'lb';
+  if (['st', 'stone', 'stones'].includes(normalized)) return 'st';
+  return null;
+}
+
+function bmrWeightToKilograms(value: number, unit: BmrWeightUnit): number {
+  if (unit === 'lb') return value * 0.45359237;
+  if (unit === 'st') return value * 6.35029318;
+  return value;
+}
+
+function bmrHeightToCentimetres(heightFeet: number, heightInches: number): number {
+  return ((heightFeet * 12) + heightInches) * 2.54;
+}
+
+function estimateBmr(age: number, sex: BmrSex, heightCm: number, weightKg: number): number {
+  return Math.round((10 * weightKg) + (6.25 * heightCm) - (5 * age) + (sex === 'male' ? 5 : -161));
+}
+
+function mapBmrProfile(row: Record<string, unknown>) {
+  return {
+    age: Number(row.age),
+    sex: String(row.sex) as BmrSex,
+    heightFeet: Number(row.height_feet),
+    heightInches: Number(row.height_inches),
+    weightSource: String(row.weight_source) as BmrWeightSource,
+    weightValue: Number(row.weight_value),
+    weightUnit: String(row.weight_unit) as BmrWeightUnit,
+    bodyPartId: row.body_part_id == null ? null : Number(row.body_part_id),
+    measurementId: row.measurement_id == null ? null : Number(row.measurement_id),
+    sourceName: row.source_name == null ? null : String(row.source_name),
+    sourceRecordedAt: row.source_recorded_at == null ? null : String(row.source_recorded_at),
+    estimatedBmr: Number(row.estimated_bmr),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+  };
+}
+
+async function readBmrProfile(database: Database, userId: number) {
+  const row = await database.prepare('SELECT * FROM bmr_profiles WHERE user_id = ?')
+    .get(userId) as unknown as Record<string, unknown> | undefined;
+  return row ? mapBmrProfile(row) : null;
+}
+
 async function readMealPlan(database: Database, userId: number, redactDescriptions = false) {
   await seedUserPlans(database, userId);
   const settingsRow = await database.prepare(`
@@ -1479,6 +1542,152 @@ function registerMealPlanRoutes(app: Express, database: Database): void {
     fat: mealFields.fat,
     sortOrder: mealFields.sortOrder,
   }).strict().refine((value) => Object.keys(value).length > 0, 'At least one field is required');
+
+  const bmrSharedFields = {
+    age: z.number().int().min(18).max(120),
+    sex: z.enum(['female', 'male']),
+    heightFeet: z.number().int().min(3).max(9),
+    heightInches: z.number().finite().min(0).lt(12),
+  };
+  const bmrInputSchema = z.discriminatedUnion('weightSource', [
+    z.object({
+      ...bmrSharedFields,
+      weightSource: z.literal('manual'),
+      weightValue: z.number().positive().finite().max(10_000),
+      weightUnit: z.enum(['kg', 'lb', 'st']),
+    }).strict(),
+    z.object({
+      ...bmrSharedFields,
+      weightSource: z.literal('measurement'),
+      bodyPartId: z.number().int().positive(),
+      measurementId: z.number().int().positive(),
+    }).strict(),
+  ]).refine(
+    (value) => {
+      const heightCm = bmrHeightToCentimetres(value.heightFeet, value.heightInches);
+      return heightCm >= 100 && heightCm <= 275;
+    },
+    { message: 'Combined height must be between 100 and 275 centimetres', path: ['heightFeet'] },
+  );
+
+  app.get('/api/meal-plan/bmr', async (_request, response) => {
+    const auth = getAuth(response);
+    sendData(response, { bmr: await readBmrProfile(database, auth.user.id) });
+  });
+
+  app.put('/api/meal-plan/bmr', async (request, response) => {
+    const auth = getAuth(response);
+    const input = bmrInputSchema.parse(request.body);
+    const bmr = await runTransaction(database, async () => {
+      let snapshot: BmrWeightSnapshot;
+
+      if (input.weightSource === 'manual') {
+        snapshot = {
+          weightSource: 'manual',
+          weightValue: input.weightValue,
+          weightUnit: input.weightUnit,
+          bodyPartId: null,
+          measurementId: null,
+          sourceName: null,
+          sourceRecordedAt: null,
+        };
+      } else {
+        const source = await database.prepare(`
+          SELECT
+            bp.id AS body_part_id,
+            bp.name AS source_name,
+            bp.unit AS source_unit,
+            m.id AS measurement_id,
+            m.value AS source_value,
+            m.recorded_at AS source_recorded_at
+          FROM body_parts bp
+          JOIN measurements m ON m.body_part_id = bp.id
+          WHERE bp.id = ? AND m.id = ? AND bp.user_id = ?
+        `).get(input.bodyPartId, input.measurementId, auth.user.id) as unknown as Record<string, unknown> | undefined;
+        if (!source) {
+          throw new HttpError(404, 'BMR_MEASUREMENT_NOT_FOUND', 'That saved weight measurement was not found');
+        }
+        const unit = normalizeBmrWeightUnit(String(source.source_unit));
+        if (!unit) {
+          throw new HttpError(
+            400,
+            'BMR_WEIGHT_UNIT_UNSUPPORTED',
+            'The selected measurement must use kilograms, pounds, or stone',
+          );
+        }
+        snapshot = {
+          weightSource: 'measurement',
+          weightValue: Number(source.source_value),
+          weightUnit: unit,
+          bodyPartId: Number(source.body_part_id),
+          measurementId: Number(source.measurement_id),
+          sourceName: String(source.source_name),
+          sourceRecordedAt: String(source.source_recorded_at),
+        };
+      }
+
+      const heightCm = bmrHeightToCentimetres(input.heightFeet, input.heightInches);
+      const weightKg = bmrWeightToKilograms(snapshot.weightValue, snapshot.weightUnit);
+      if (!Number.isFinite(weightKg) || weightKg < 20 || weightKg > 500) {
+        throw new HttpError(400, 'BMR_WEIGHT_OUT_OF_RANGE', 'Weight must be between 20 and 500 kilograms');
+      }
+      const estimatedBmr = estimateBmr(input.age, input.sex, heightCm, weightKg);
+      if (!Number.isFinite(estimatedBmr) || estimatedBmr <= 0) {
+        throw new HttpError(400, 'BMR_RESULT_INVALID', 'Those details could not produce a valid BMR estimate');
+      }
+
+      const timestamp = now();
+      await database.prepare(`
+        INSERT INTO bmr_profiles (
+          user_id, age, sex, height_feet, height_inches, weight_source,
+          weight_value, weight_unit, body_part_id, measurement_id,
+          source_name, source_recorded_at, estimated_bmr, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET
+          age = excluded.age,
+          sex = excluded.sex,
+          height_feet = excluded.height_feet,
+          height_inches = excluded.height_inches,
+          weight_source = excluded.weight_source,
+          weight_value = excluded.weight_value,
+          weight_unit = excluded.weight_unit,
+          body_part_id = excluded.body_part_id,
+          measurement_id = excluded.measurement_id,
+          source_name = excluded.source_name,
+          source_recorded_at = excluded.source_recorded_at,
+          estimated_bmr = excluded.estimated_bmr,
+          updated_at = excluded.updated_at
+      `).run(
+        auth.user.id,
+        input.age,
+        input.sex,
+        input.heightFeet,
+        input.heightInches,
+        snapshot.weightSource,
+        snapshot.weightValue,
+        snapshot.weightUnit,
+        snapshot.bodyPartId,
+        snapshot.measurementId,
+        snapshot.sourceName,
+        snapshot.sourceRecordedAt,
+        estimatedBmr,
+        timestamp,
+        timestamp,
+      );
+      await writeAudit(database, {
+        actorUserId: auth.user.id,
+        action: 'meal.bmr_updated',
+        targetType: 'meal_plan',
+        targetId: auth.user.id,
+        ipAddress: requestIp(request),
+      });
+
+      const stored = await readBmrProfile(database, auth.user.id);
+      if (!stored) throw new Error('BMR profile was not saved');
+      return stored;
+    });
+    sendData(response, { bmr });
+  });
 
   app.get('/api/meal-plan', async (_request, response) => {
     const auth = getAuth(response);
@@ -2137,6 +2346,7 @@ function registerAdminRoutes(app: Express, database: Database): void {
       `).run(userId);
       await database.prepare('DELETE FROM workout_days WHERE user_id = ?').run(userId);
       await database.prepare('DELETE FROM meals WHERE user_id = ?').run(userId);
+      await database.prepare('DELETE FROM bmr_profiles WHERE user_id = ?').run(userId);
       await database.prepare('DELETE FROM meal_plan_settings WHERE user_id = ?').run(userId);
       await database.prepare(`
         DELETE FROM sharing_permissions WHERE owner_user_id = ? OR viewer_user_id = ?
@@ -2246,13 +2456,14 @@ function registerExportRoute(app: Express, database: Database): void {
 
     response.setHeader('Content-Disposition', `attachment; filename="forge-export-${new Date().toISOString().slice(0, 10)}.json"`);
     sendData(response, {
-      formatVersion: 2,
+      formatVersion: 3,
       exportedAt: now(),
       user: auth.user,
       bodyParts,
       exercises,
       workoutPlan: await readWorkoutPlan(database, auth.user.id),
       mealPlan: await readMealPlan(database, auth.user.id),
+      bmrProfile: await readBmrProfile(database, auth.user.id),
       sharing: {
         outgoingShares: shareRows.filter((share) => Number(share.owner_user_id) === auth.user.id).map(mapShare),
         incomingShares: shareRows.filter((share) => Number(share.viewer_user_id) === auth.user.id).map(mapShare),
