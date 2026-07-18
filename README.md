@@ -56,6 +56,12 @@ Render's free web service may spin down while inactive, so the first request aft
 
 Render supplies `PORT`; it should not be added manually. The service is configured for Node 24 in `.node-version`, `package.json`, and `render.yaml`.
 
+## Install on iPhone
+
+After Forge is deployed, open its HTTPS address on the iPhone, choose **Share > Add to Home Screen**, leave **Open as Web App** enabled if that option is shown, and tap **Add**. Forge then launches in standalone mode without Safari's address and tab bars. The iPhone status bar and Home indicator can still remain, just as they do in native apps.
+
+If Forge was added before its web-app manifest was deployed, remove the old Home Screen icon and add it again. Existing browser-bookmark icons keep their original launch behaviour.
+
 ## GitHub checks
 
 The workflow in `.github/workflows/ci.yml` runs on pushes and pull requests. It installs the locked dependencies with `npm ci`, then runs the TypeScript checks, automated tests, and production build on Node 24.
