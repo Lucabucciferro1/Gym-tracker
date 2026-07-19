@@ -288,7 +288,7 @@ describe('saved BMR profile', () => {
 
     const exported = await admin.get('/api/export').expect(200);
     expect(exported.body.data).toMatchObject({
-      formatVersion: 3,
+      formatVersion: 4,
       bmrProfile: updated.body.data.bmr,
     });
 

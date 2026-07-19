@@ -5,9 +5,12 @@ import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
+  DEFAULT_MOBILE_NAVIGATION_ITEMS,
   openDatabase,
+  replaceUserMobileNavigation,
   runTransaction,
   seedUserDefaults,
+  seedUserMobileNavigation,
   seedUserPlans,
   writeAudit,
   type Database,
@@ -87,6 +90,10 @@ describe('database initialization', () => {
     expect(ownerBench).toBeTruthy();
     expect(memberBench).toBeTruthy();
     expect(ownerBench).not.toEqual(memberBench);
+    expect(await db.prepare(`
+      SELECT destination FROM mobile_navigation_items
+      WHERE user_id = ? ORDER BY position ASC
+    `).all(ownerId)).toEqual(DEFAULT_MOBILE_NAVIGATION_ITEMS.map((destination) => ({ destination })));
   });
 
   it('avoids orphaned defaults and audit actors when foreign-key enforcement is unavailable', async () => {
@@ -94,6 +101,7 @@ describe('database initialization', () => {
     await db.prepare('PRAGMA foreign_keys = OFF').run();
 
     await seedUserDefaults(db, 999_999);
+    await seedUserMobileNavigation(db, 999_999);
     await seedUserPlans(db, 999_999);
     await writeAudit(db, {
       actorUserId: 999_999,
@@ -105,6 +113,7 @@ describe('database initialization', () => {
     expect(await db.prepare('SELECT COUNT(*) AS count FROM exercises').get()).toEqual({ count: 0 });
     expect(await db.prepare('SELECT COUNT(*) AS count FROM workout_days').get()).toEqual({ count: 0 });
     expect(await db.prepare('SELECT COUNT(*) AS count FROM meal_plan_settings').get()).toEqual({ count: 0 });
+    expect(await db.prepare('SELECT COUNT(*) AS count FROM mobile_navigation_items').get()).toEqual({ count: 0 });
     expect(await db.prepare('SELECT actor_user_id, actor_username FROM audit_log').get())
       .toEqual({ actor_user_id: null, actor_username: null });
   });
@@ -143,6 +152,32 @@ describe('database initialization', () => {
     expect(await db.prepare('SELECT COUNT(*) AS count FROM users').get()).toEqual({ count: 2 });
   });
 
+  it('atomically replaces navigation rows when an insert fails partway through', async () => {
+    const db = await openTemporaryDatabase();
+    const userId = await insertUser(db, 'Navigation owner');
+    await seedUserDefaults(db, userId);
+    const original = ['meals', 'workout', 'lifts', 'measurements'] as const;
+    await replaceUserMobileNavigation(db, userId, original);
+    await db.exec(`
+      CREATE TRIGGER reject_sharing_navigation
+      BEFORE INSERT ON mobile_navigation_items
+      WHEN NEW.destination = 'sharing'
+      BEGIN
+        SELECT RAISE(ABORT, 'test navigation failure');
+      END;
+    `);
+
+    await expect(replaceUserMobileNavigation(
+      db,
+      userId,
+      ['dashboard', 'meals', 'sharing', 'workout'],
+    )).rejects.toThrow();
+    expect(await db.prepare(`
+      SELECT destination FROM mobile_navigation_items
+      WHERE user_id = ? ORDER BY position ASC
+    `).all(userId)).toEqual(original.map((destination) => ({ destination })));
+  });
+
   it('cascades a deleted user through their private measurement and lift data', async () => {
     const db = await openTemporaryDatabase();
     const userId = await insertUser(db, 'Disposable');
@@ -166,6 +201,7 @@ describe('database initialization', () => {
     expect(await db.prepare('SELECT COUNT(*) AS count FROM lift_records').get()).toEqual({ count: 0 });
     expect(await db.prepare('SELECT COUNT(*) AS count FROM body_parts').get()).toEqual({ count: 0 });
     expect(await db.prepare('SELECT COUNT(*) AS count FROM exercises').get()).toEqual({ count: 0 });
+    expect(await db.prepare('SELECT COUNT(*) AS count FROM mobile_navigation_items').get()).toEqual({ count: 0 });
   });
 
   it('migrates legacy audit logs, snapshots actors, and scrubs private training metadata', async () => {
@@ -210,6 +246,10 @@ describe('database initialization', () => {
     expect(await database.prepare(`
       SELECT actor_username, metadata FROM audit_log WHERE id = 1
     `).get()).toEqual({ actor_username: 'Legacy member', metadata: null });
+    expect(await database.prepare(`
+      SELECT destination FROM mobile_navigation_items
+      WHERE user_id = 1 ORDER BY position ASC
+    `).all()).toEqual(DEFAULT_MOBILE_NAVIGATION_ITEMS.map((destination) => ({ destination })));
   });
 
 });

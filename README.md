@@ -75,6 +75,7 @@ The repository ignores local dependencies, compiled output, environment files, S
 - Custom measurement types and dated measurement history, with saved drag-and-drop ordering
 - Custom exercises, max-lift history, estimated one-rep max values, and saved drag-and-drop ordering
 - Responsive progress charts with date-range filtering
+- A per-user mobile bottom bar with four selectable, ordered shortcuts and a permanent More gateway
 - Editing, deletion, notes, and unit-aware records
 - A customizable seven-day workout plan with named sessions, exercises, notes, and explicit rest days
 - A seven-day meal plan with optional calories, macro targets, independently switchable calorie/macro displays, and a saved BMR estimate that can use a selected weight check-in or manual weight

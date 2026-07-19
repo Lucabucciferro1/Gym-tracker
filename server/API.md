@@ -36,6 +36,24 @@ stored only as hashes. Activation consumes the code. Invalid or already-consumed
 Only failed login attempts consume the login rate limit. Activation attempts have a separate
 rate limit. Calls to the closed setup endpoint cannot exhaust the login quota.
 
+## Mobile navigation preferences
+
+The mobile navigation has four configurable positions followed by a fixed `More` item.
+Preferences belong to the signed-in user and are shared across that user's sessions and devices.
+
+| Method | Route | Body | `data` |
+| --- | --- | --- | --- |
+| GET | `/api/preferences/mobile-navigation` | - | `{ items }` |
+| PUT | `/api/preferences/mobile-navigation` | `{ items }` | `{ items }` |
+| POST | `/api/preferences/mobile-navigation/reset` | - | `{ items }` restored to defaults |
+
+`items` must contain exactly four unique destinations chosen from `dashboard`, `measurements`,
+`lifts`, `workout`, `meals`, `sharing`, and `admin`. The `admin` destination returns
+`403 NAV_ITEM_FORBIDDEN` for members. Unknown values, duplicates, wrong-length arrays, and
+unknown body fields return `400 VALIDATION_ERROR` without changing the saved order. `More` is
+client-derived and cannot be stored. The default order is `dashboard`, `measurements`, `lifts`,
+then `workout`. Invalid or incomplete legacy rows are repaired to a valid order when read.
+
 ## Body measurements
 
 | Method | Route | Body | `data` |
@@ -200,17 +218,18 @@ meal-plan content remain private.
 
 ## Export, deletion, and health
 
-- `GET /api/export` downloads format version 3 for the signed-in user as
-  `{ formatVersion, exportedAt, user, bodyParts, exercises, workoutPlan, mealPlan, bmrProfile, sharing }`.
+- `GET /api/export` downloads format version 4 for the signed-in user as
+  `{ formatVersion, exportedAt, user, bodyParts, exercises, workoutPlan, mealPlan, bmrProfile, mobileNavigation, sharing }`.
   Body parts and exercises retain the user's saved resource order and include `sortOrder`.
+  `mobileNavigation` is `{ items }` and contains only the signed-in user's saved destinations.
   `sharing` contains only the user's outgoing/incoming permission metadata, never another
   user's progress records.
 - `GET /api/health` returns `{ status: "ok" }`.
 
-The initial administrator and every invited account receive independent default body
-parts, exercises, seven workout days, and meal settings. Deleting an account cascades through
-its sessions, body data, lift data, workout plan, meal plan, BMR profile, and any incoming or
-outgoing sharing grants.
+The initial administrator and every invited account receive independent default body parts,
+exercises, seven workout days, meal settings, and mobile-navigation preferences. Deleting an
+account cascades through its sessions, body data, lift data, workout plan, meal plan, BMR profile,
+mobile-navigation preferences, and any incoming or outgoing sharing grants.
 
 Every resource query includes the signed-in user's ID. Nested-record routes also verify
 ownership of their parent. In production the API serves `dist/` and falls back to

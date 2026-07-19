@@ -2363,6 +2363,14 @@ td strong {
     color: var(--primary);
   }
 
+  .mobile-nav a span {
+    max-width: 100%;
+    overflow: hidden;
+    padding-inline: 2px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
   .page-content {
     padding: 23px 15px 30px;
   }

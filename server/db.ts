@@ -156,6 +156,25 @@ const DEFAULT_EXERCISES = [
   ['Barbell Row', 'Back', 'kg', '#ef4444'],
 ] as const;
 
+export const MOBILE_NAVIGATION_DESTINATIONS = [
+  'dashboard',
+  'measurements',
+  'lifts',
+  'workout',
+  'meals',
+  'sharing',
+  'admin',
+] as const;
+
+export type MobileNavigationDestination = typeof MOBILE_NAVIGATION_DESTINATIONS[number];
+
+export const DEFAULT_MOBILE_NAVIGATION_ITEMS = [
+  'dashboard',
+  'measurements',
+  'lifts',
+  'workout',
+] as const satisfies readonly MobileNavigationDestination[];
+
 function localDatabaseUrl(databasePath: string): string {
   if (databasePath === ':memory:') return ':memory:';
 
@@ -214,6 +233,18 @@ export async function initializeDatabase(database: Database): Promise<void> {
       expires_at TEXT NOT NULL,
       ip_address TEXT,
       user_agent TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS mobile_navigation_items (
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      position INTEGER NOT NULL CHECK (position BETWEEN 0 AND 3),
+      destination TEXT NOT NULL CHECK (
+        destination IN ('dashboard', 'measurements', 'lifts', 'workout', 'meals', 'sharing', 'admin')
+      ),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (user_id, position),
+      UNIQUE (user_id, destination)
     );
 
     CREATE TABLE IF NOT EXISTS body_parts (
@@ -477,8 +508,13 @@ export async function initializeDatabase(database: Database): Promise<void> {
     `).run();
   });
 
-  const users = await database.prepare('SELECT id FROM users').all() as unknown as Array<{ id: number }>;
-  for (const user of users) await seedUserPlans(database, Number(user.id));
+  const users = await database.prepare('SELECT id, role FROM users').all() as unknown as Array<{ id: number; role: string }>;
+  for (const user of users) {
+    const userId = Number(user.id);
+    await seedUserPlans(database, userId);
+    await seedUserMobileNavigation(database, userId);
+    await readUserMobileNavigation(database, userId, user.role === 'admin');
+  }
 }
 
 export async function seedUserDefaults(database: Database, userId: number): Promise<void> {
@@ -507,6 +543,7 @@ export async function seedUserDefaults(database: Database, userId: number): Prom
   `).run(...exerciseArgs, now, now, userId);
 
   await seedUserPlans(database, userId);
+  await seedUserMobileNavigation(database, userId);
 }
 
 export async function seedUserPlans(database: Database, userId: number): Promise<void> {
@@ -525,6 +562,93 @@ export async function seedUserPlans(database: Database, userId: number): Promise
     )
     SELECT id, 1, 1, ?, ? FROM users WHERE id = ?
   `).run(timestamp, timestamp, userId);
+}
+
+interface MobileNavigationRow {
+  position: number;
+  destination: string;
+}
+
+function validMobileNavigation(
+  rows: MobileNavigationRow[],
+  allowAdmin: boolean,
+): rows is Array<{ position: number; destination: MobileNavigationDestination }> {
+  if (rows.length !== DEFAULT_MOBILE_NAVIGATION_ITEMS.length) return false;
+  const destinations = new Set<string>();
+  return rows.every((row, position) => {
+    if (Number(row.position) !== position) return false;
+    if (!MOBILE_NAVIGATION_DESTINATIONS.includes(row.destination as MobileNavigationDestination)) return false;
+    if (!allowAdmin && row.destination === 'admin') return false;
+    if (destinations.has(row.destination)) return false;
+    destinations.add(row.destination);
+    return true;
+  });
+}
+
+async function mobileNavigationRows(database: Database, userId: number): Promise<MobileNavigationRow[]> {
+  return database.prepare(`
+    SELECT position, destination
+    FROM mobile_navigation_items
+    WHERE user_id = ?
+    ORDER BY position ASC
+  `).all(userId) as unknown as MobileNavigationRow[];
+}
+
+export async function seedUserMobileNavigation(database: Database, userId: number): Promise<void> {
+  const timestamp = new Date().toISOString();
+  const values = DEFAULT_MOBILE_NAVIGATION_ITEMS.map(() => '(?, ?)').join(', ');
+  const args = DEFAULT_MOBILE_NAVIGATION_ITEMS.flatMap((destination, position) => [position, destination]);
+  await database.prepare(`
+    WITH desired(position, destination) AS (VALUES ${values})
+    INSERT OR IGNORE INTO mobile_navigation_items (
+      user_id, position, destination, created_at, updated_at
+    )
+    SELECT users.id, desired.position, desired.destination, ?, ?
+    FROM users CROSS JOIN desired
+    WHERE users.id = ?
+  `).run(...args, timestamp, timestamp, userId);
+}
+
+export async function replaceUserMobileNavigation(
+  database: Database,
+  userId: number,
+  items: readonly MobileNavigationDestination[],
+): Promise<MobileNavigationDestination[]> {
+  const rows = items.map((destination, position) => ({ position, destination }));
+  if (!validMobileNavigation(rows, true)) {
+    throw new Error('Mobile navigation must contain four unique supported destinations');
+  }
+
+  await database.transaction(async () => {
+    await database.prepare('DELETE FROM mobile_navigation_items WHERE user_id = ?').run(userId);
+    const timestamp = new Date().toISOString();
+    const insert = database.prepare(`
+      INSERT INTO mobile_navigation_items (
+        user_id, position, destination, created_at, updated_at
+      )
+      SELECT id, ?, ?, ?, ? FROM users WHERE id = ?
+    `);
+    for (const [position, destination] of items.entries()) {
+      const result = await insert.run(position, destination, timestamp, timestamp, userId);
+      if (result.changes !== 1) throw new Error('Mobile navigation owner is unavailable');
+    }
+  });
+  return [...items];
+}
+
+export async function readUserMobileNavigation(
+  database: Database,
+  userId: number,
+  allowAdmin: boolean,
+): Promise<MobileNavigationDestination[]> {
+  const rows = await mobileNavigationRows(database, userId);
+  if (validMobileNavigation(rows, allowAdmin)) return rows.map((row) => row.destination);
+
+  return database.transaction(async () => {
+    const latestRows = await mobileNavigationRows(database, userId);
+    if (validMobileNavigation(latestRows, allowAdmin)) return latestRows.map((row) => row.destination);
+    return replaceUserMobileNavigation(database, userId, DEFAULT_MOBILE_NAVIGATION_ITEMS);
+  });
 }
 
 export interface AuditEntryInput {

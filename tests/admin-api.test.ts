@@ -227,6 +227,11 @@ describe('admin account safeguards', () => {
       .post(`/api/exercises/${exercises.body.data.exercises[0].id}/lifts`)
       .send({ weight: 100, reps: 1 })
       .expect(201);
+    await memberAgent
+      .put('/api/preferences/mobile-navigation')
+      .send({ items: ['meals', 'sharing', 'measurements', 'lifts'] })
+      .expect(200);
+    await database.prepare('PRAGMA foreign_keys = OFF').run();
 
     await admin.delete(`/api/admin/users/${member.id}`).expect(200);
 
@@ -234,6 +239,8 @@ describe('admin account safeguards', () => {
     expect(await database.prepare('SELECT COUNT(*) AS count FROM body_parts WHERE user_id = ?').get(member.id))
       .toEqual({ count: 0 });
     expect(await database.prepare('SELECT COUNT(*) AS count FROM exercises WHERE user_id = ?').get(member.id))
+      .toEqual({ count: 0 });
+    expect(await database.prepare('SELECT COUNT(*) AS count FROM mobile_navigation_items WHERE user_id = ?').get(member.id))
       .toEqual({ count: 0 });
     expect(await database.prepare(`
       SELECT action, target_id FROM audit_log

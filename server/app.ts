@@ -6,13 +6,18 @@ import rateLimit from 'express-rate-limit';
 import helmet from 'helmet';
 import { ZodError, z } from 'zod';
 import {
+  DEFAULT_MOBILE_NAVIGATION_ITEMS,
+  MOBILE_NAVIGATION_DESTINATIONS,
   initializeDatabase,
   openDatabase,
+  readUserMobileNavigation,
+  replaceUserMobileNavigation,
   runTransaction,
   seedUserDefaults,
   seedUserPlans,
   writeAudit,
   type Database,
+  type MobileNavigationDestination,
 } from './db.js';
 import {
   createInviteCode,
@@ -609,6 +614,7 @@ export async function createApp(options: CreateAppOptions = {}): Promise<Express
   registerExerciseRoutes(app, database);
   registerWorkoutPlanRoutes(app, database);
   registerMealPlanRoutes(app, database);
+  registerPreferenceRoutes(app, database);
   registerSharingRoutes(app, database);
   registerAdminRoutes(app, database);
   registerExportRoute(app, database);
@@ -659,6 +665,67 @@ export async function createApp(options: CreateAppOptions = {}): Promise<Express
   });
 
   return app;
+}
+
+function registerPreferenceRoutes(app: Express, database: Database): void {
+  const destinationSchema = z.enum(MOBILE_NAVIGATION_DESTINATIONS);
+  const preferenceSchema = z.object({
+    items: z.array(destinationSchema).length(DEFAULT_MOBILE_NAVIGATION_ITEMS.length),
+  }).strict().superRefine(({ items }, context) => {
+    if (new Set(items).size !== items.length) {
+      context.addIssue({
+        code: 'custom',
+        path: ['items'],
+        message: 'Mobile navigation destinations must be unique',
+      });
+    }
+  });
+
+  function requireAllowedDestinations(auth: AuthState, items: MobileNavigationDestination[]): void {
+    if (auth.user.role !== 'admin' && items.includes('admin')) {
+      throw new HttpError(403, 'NAV_ITEM_FORBIDDEN', 'The admin destination requires administrator access');
+    }
+  }
+
+  app.get('/api/preferences/mobile-navigation', async (_request, response) => {
+    const auth = getAuth(response);
+    const items = await readUserMobileNavigation(database, auth.user.id, auth.user.role === 'admin');
+    sendData(response, { items });
+  });
+
+  app.put('/api/preferences/mobile-navigation', async (request, response) => {
+    const auth = getAuth(response);
+    const { items } = preferenceSchema.parse(request.body);
+    requireAllowedDestinations(auth, items);
+    await runTransaction(database, async () => {
+      await replaceUserMobileNavigation(database, auth.user.id, items);
+      await writeAudit(database, {
+        actorUserId: auth.user.id,
+        action: 'preferences.mobile_navigation_updated',
+        targetType: 'user_preferences',
+        targetId: auth.user.id,
+        metadata: { items },
+        ipAddress: requestIp(request),
+      });
+    });
+    sendData(response, { items });
+  });
+
+  app.post('/api/preferences/mobile-navigation/reset', async (request, response) => {
+    const auth = getAuth(response);
+    const items = [...DEFAULT_MOBILE_NAVIGATION_ITEMS];
+    await runTransaction(database, async () => {
+      await replaceUserMobileNavigation(database, auth.user.id, items);
+      await writeAudit(database, {
+        actorUserId: auth.user.id,
+        action: 'preferences.mobile_navigation_reset',
+        targetType: 'user_preferences',
+        targetId: auth.user.id,
+        ipAddress: requestIp(request),
+      });
+    });
+    sendData(response, { items });
+  });
 }
 
 function registerBodyPartRoutes(app: Express, database: Database): void {
@@ -2348,6 +2415,7 @@ function registerAdminRoutes(app: Express, database: Database): void {
       await database.prepare('DELETE FROM meals WHERE user_id = ?').run(userId);
       await database.prepare('DELETE FROM bmr_profiles WHERE user_id = ?').run(userId);
       await database.prepare('DELETE FROM meal_plan_settings WHERE user_id = ?').run(userId);
+      await database.prepare('DELETE FROM mobile_navigation_items WHERE user_id = ?').run(userId);
       await database.prepare(`
         DELETE FROM sharing_permissions WHERE owner_user_id = ? OR viewer_user_id = ?
       `).run(userId, userId);
@@ -2456,7 +2524,7 @@ function registerExportRoute(app: Express, database: Database): void {
 
     response.setHeader('Content-Disposition', `attachment; filename="forge-export-${new Date().toISOString().slice(0, 10)}.json"`);
     sendData(response, {
-      formatVersion: 3,
+      formatVersion: 4,
       exportedAt: now(),
       user: auth.user,
       bodyParts,
@@ -2464,6 +2532,9 @@ function registerExportRoute(app: Express, database: Database): void {
       workoutPlan: await readWorkoutPlan(database, auth.user.id),
       mealPlan: await readMealPlan(database, auth.user.id),
       bmrProfile: await readBmrProfile(database, auth.user.id),
+      mobileNavigation: {
+        items: await readUserMobileNavigation(database, auth.user.id, auth.user.role === 'admin'),
+      },
       sharing: {
         outgoingShares: shareRows.filter((share) => Number(share.owner_user_id) === auth.user.id).map(mapShare),
         incomingShares: shareRows.filter((share) => Number(share.viewer_user_id) === auth.user.id).map(mapShare),

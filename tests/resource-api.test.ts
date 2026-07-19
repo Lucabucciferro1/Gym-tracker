@@ -211,7 +211,7 @@ describe('private data export', () => {
     const memberExport = await member.get('/api/export').expect(200);
     expect(memberExport.headers['content-disposition']).toMatch(/^attachment; filename="forge-export-\d{4}-\d{2}-\d{2}\.json"$/);
     expect(memberExport.body.data).toMatchObject({
-      formatVersion: 3,
+      formatVersion: 4,
       user: { username: 'Member', role: 'user' },
       bodyParts: [{
         name: 'Exported waist',
@@ -222,6 +222,9 @@ describe('private data export', () => {
         lifts: [{ weight: 70, reps: 3, note: 'member lift' }],
       }],
       sharing: { outgoingShares: [], incomingShares: [] },
+      mobileNavigation: {
+        items: ['dashboard', 'measurements', 'lifts', 'workout'],
+      },
     });
     expect(memberExport.body.data.workoutPlan.days).toHaveLength(7);
     expect(memberExport.body.data.mealPlan.days).toHaveLength(7);

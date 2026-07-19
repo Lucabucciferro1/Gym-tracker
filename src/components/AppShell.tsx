@@ -16,14 +16,22 @@ import {
   ShieldCheck,
   UsersRound,
   Utensils,
-  Ellipsis,
 } from 'lucide-react'
-import { useEffect, useRef, useState, type FormEvent } from 'react'
-import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
+import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { api, errorMessage } from '../api'
 import '../account.css'
 import { useAuth } from '../context/AuthContext'
 import { useToast } from '../context/ToastContext'
+import {
+  DEFAULT_MOBILE_NAVIGATION,
+  MOBILE_NAVIGATION_CATALOG,
+  MOBILE_NAVIGATION_MORE,
+  navigationPathMatches,
+  normalizeMobileNavigation,
+  type MobileNavigationOutletContext,
+} from '../mobileNavigation'
+import type { MobileNavigationDestination } from '../types'
 import { downloadBlob } from '../utils'
 import { Brand, Button, Modal } from './ui'
 
@@ -47,14 +55,6 @@ const planLinks: NavigationLink[] = [
 
 const socialLinks: NavigationLink[] = [
   { to: '/sharing', label: 'Sharing', icon: UsersRound },
-]
-
-const mobileLinks: NavigationLink[] = [
-  trainingLinks[0],
-  trainingLinks[1],
-  trainingLinks[2],
-  planLinks[0],
-  { to: '/more', label: 'More', icon: Ellipsis },
 ]
 
 const pageLabels: Record<string, string> = {
@@ -101,12 +101,50 @@ export function AppShell() {
   const [accountOpen, setAccountOpen] = useState(false)
   const [accountModal, setAccountModal] = useState<AccountModalState | null>(null)
   const [signingOut, setSigningOut] = useState(false)
+  const [mobileNavigationItems, setMobileNavigationItems] = useState<MobileNavigationDestination[]>(
+    [...DEFAULT_MOBILE_NAVIGATION],
+  )
+  const [mobileNavigationLoading, setMobileNavigationLoading] = useState(true)
+  const [mobileNavigationError, setMobileNavigationError] = useState('')
   const accountControlRef = useRef<HTMLDivElement>(null)
   const accountButtonRef = useRef<HTMLButtonElement>(null)
   const accountPopoverRef = useRef<HTMLDivElement>(null)
   const mobileAccountButtonRef = useRef<HTMLButtonElement>(null)
+  const mobileNavigationRequestRef = useRef(0)
   const isAdmin = user?.role === 'admin'
   const adminLinks = isAdmin ? [{ to: '/admin', label: 'Admin', icon: ShieldCheck }] : []
+  const mobileRole = user?.role ?? 'user'
+
+  const loadMobileNavigation = useCallback(async () => {
+    if (!user) return
+    const requestId = ++mobileNavigationRequestRef.current
+    setMobileNavigationLoading(true)
+    setMobileNavigationError('')
+    try {
+      const preference = await api.preferences.getMobileNavigation()
+      if (requestId !== mobileNavigationRequestRef.current) return
+      setMobileNavigationItems(normalizeMobileNavigation(preference.items, user.role))
+    } catch (caught) {
+      if (requestId !== mobileNavigationRequestRef.current) return
+      setMobileNavigationError(errorMessage(caught))
+    } finally {
+      if (requestId === mobileNavigationRequestRef.current) setMobileNavigationLoading(false)
+    }
+  }, [user?.id, user?.role])
+
+  useEffect(() => {
+    mobileNavigationRequestRef.current += 1
+    setMobileNavigationItems([...DEFAULT_MOBILE_NAVIGATION])
+    setMobileNavigationError('')
+    if (!user) {
+      setMobileNavigationLoading(false)
+      return
+    }
+    void loadMobileNavigation()
+    return () => {
+      mobileNavigationRequestRef.current += 1
+    }
+  }, [loadMobileNavigation, user?.id])
 
   useEffect(() => {
     setAccountOpen(false)
@@ -163,6 +201,31 @@ export function AppShell() {
       setAccountModal(null)
       navigate('/login', { replace: true })
     }
+  }
+
+  async function saveMobileNavigation(
+    items: MobileNavigationDestination[],
+  ): Promise<MobileNavigationDestination[]> {
+    const preference = await api.preferences.updateMobileNavigation(items)
+    const savedItems = normalizeMobileNavigation(preference.items, mobileRole)
+    setMobileNavigationItems(savedItems)
+    setMobileNavigationError('')
+    return savedItems
+  }
+
+  const displayedMobileNavigation = mobileNavigationItems.map(
+    (item) => MOBILE_NAVIGATION_CATALOG[item],
+  )
+  const pinnedMobileDestinationActive = displayedMobileNavigation.some(
+    (item) => navigationPathMatches(location.pathname, item.to),
+  )
+  const MoreIcon = MOBILE_NAVIGATION_MORE.icon
+  const mobileNavigationContext: MobileNavigationOutletContext = {
+    mobileNavigationItems,
+    mobileNavigationLoading,
+    mobileNavigationError,
+    saveMobileNavigation,
+    retryMobileNavigation: loadMobileNavigation,
   }
 
   return (
@@ -256,22 +319,34 @@ export function AppShell() {
             {user?.username.charAt(0).toUpperCase()}
           </button>
         </header>
-        <main className="page-content"><Outlet /></main>
+        <main className="page-content"><Outlet context={mobileNavigationContext} /></main>
       </div>
 
-      <nav className="mobile-nav" aria-label="Mobile navigation">
-        {mobileLinks.map(({ to, label, icon: Icon, end }) => (
-          <NavLink
-            key={to}
-            to={to}
-            end={end}
-            className={({ isActive }) => (isActive ? 'is-active' : '')}
-            aria-label={label}
-          >
-            <Icon size={20} />
-            <span>{label === 'Max lifts' ? 'Lifts' : label}</span>
-          </NavLink>
-        ))}
+      <nav className="mobile-nav" aria-label="Mobile navigation" aria-busy={mobileNavigationLoading}>
+        {displayedMobileNavigation.map(({ key, to, label, shortLabel, icon: Icon }) => {
+          const isActive = navigationPathMatches(location.pathname, to)
+          return (
+            <Link
+              key={key}
+              to={to}
+              className={isActive ? 'is-active' : ''}
+              aria-label={label}
+              aria-current={isActive ? 'page' : undefined}
+            >
+              <Icon size={20} />
+              <span>{shortLabel}</span>
+            </Link>
+          )
+        })}
+        <Link
+          to={MOBILE_NAVIGATION_MORE.to}
+          className={pinnedMobileDestinationActive ? '' : 'is-active'}
+          aria-label={MOBILE_NAVIGATION_MORE.label}
+          aria-current={pinnedMobileDestinationActive ? undefined : 'page'}
+        >
+          <MoreIcon size={20} />
+          <span>{MOBILE_NAVIGATION_MORE.shortLabel}</span>
+        </Link>
       </nav>
 
       <AccountModal

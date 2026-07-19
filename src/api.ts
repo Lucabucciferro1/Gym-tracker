@@ -11,6 +11,8 @@ import type {
   MealPlanSettings,
   BmrProfile,
   BmrProfileInput,
+  MobileNavigationDestination,
+  MobileNavigationPreference,
   ProgressShare,
   SharedProgress,
   SharingOverview,
@@ -116,6 +118,19 @@ export const api = {
       request<{ user: User }>('/api/auth/profile', {
         method: 'PATCH',
         body: json({ username }),
+      }),
+  },
+  preferences: {
+    getMobileNavigation: () =>
+      request<MobileNavigationPreference>('/api/preferences/mobile-navigation'),
+    updateMobileNavigation: (items: MobileNavigationDestination[]) =>
+      request<MobileNavigationPreference>('/api/preferences/mobile-navigation', {
+        method: 'PUT',
+        body: json({ items }),
+      }),
+    resetMobileNavigation: () =>
+      request<MobileNavigationPreference>('/api/preferences/mobile-navigation/reset', {
+        method: 'POST',
       }),
   },
   bodyParts: {

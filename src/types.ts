@@ -1,5 +1,18 @@
 export type UserRole = 'admin' | 'user'
 
+export type MobileNavigationDestination =
+  | 'dashboard'
+  | 'measurements'
+  | 'lifts'
+  | 'workout'
+  | 'meals'
+  | 'sharing'
+  | 'admin'
+
+export interface MobileNavigationPreference {
+  items: MobileNavigationDestination[]
+}
+
 export interface User {
   id: number
   username: string
