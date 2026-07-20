@@ -8,12 +8,19 @@ import {
   Sparkles,
   Trash2,
   TriangleAlert,
+  X,
 } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useState, type FormEvent, type KeyboardEvent } from 'react'
-import { api, errorMessage } from '../api'
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from 'react'
+import { ApiError, api, errorMessage } from '../api'
 import { Button, EmptyState, ErrorNotice, Modal, PageHeader } from '../components/ui'
 import { useToast } from '../context/ToastContext'
-import type { WorkoutDay, WorkoutExercise } from '../types'
+import {
+  CHART_COLORS,
+  type Exercise,
+  type WorkoutDay,
+  type WorkoutDayInput,
+  type WorkoutExercise,
+} from '../types'
 import '../plans.css'
 
 const DAYS = [
@@ -28,7 +35,8 @@ const DAYS = [
 
 interface ExerciseDraft {
   key: string
-  name: string
+  exerciseId: number | null
+  exerciseName: string
   sets: string
   reps: string
   notes: string
@@ -39,13 +47,14 @@ function draftKey() {
 }
 
 function blankExercise(): ExerciseDraft {
-  return { key: draftKey(), name: '', sets: '3', reps: '8', notes: '' }
+  return { key: draftKey(), exerciseId: null, exerciseName: '', sets: '3', reps: '8', notes: '' }
 }
 
 function toDraft(exercise: WorkoutExercise): ExerciseDraft {
   return {
     key: draftKey(),
-    name: exercise.name,
+    exerciseId: exercise.exerciseId,
+    exerciseName: exercise.name,
     sets: String(exercise.sets),
     reps: String(exercise.reps),
     notes: exercise.notes ?? '',
@@ -62,9 +71,14 @@ export function WorkoutPlanPage() {
   const [selectedDay, setSelectedDay] = useState(0)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [exerciseCatalog, setExerciseCatalog] = useState<Exercise[]>([])
+  const [catalogLoading, setCatalogLoading] = useState(true)
+  const [catalogError, setCatalogError] = useState('')
   const [editorOpen, setEditorOpen] = useState(false)
   const [saving, setSaving] = useState(false)
   const [formError, setFormError] = useState('')
+
+  const catalogRequest = useRef(0)
 
   const load = useCallback(async (showLoading = true) => {
     if (showLoading) setLoading(true)
@@ -83,9 +97,24 @@ export function WorkoutPlanPage() {
     }
   }, [])
 
+  const loadCatalog = useCallback(async (showLoading = true) => {
+    const requestId = ++catalogRequest.current
+    if (showLoading) setCatalogLoading(true)
+    setCatalogError('')
+    try {
+      const nextExercises = await api.exercises.list()
+      if (requestId === catalogRequest.current) setExerciseCatalog(nextExercises)
+    } catch (caught) {
+      if (requestId === catalogRequest.current) setCatalogError(errorMessage(caught))
+    } finally {
+      if (showLoading && requestId === catalogRequest.current) setCatalogLoading(false)
+    }
+  }, [])
+
   useEffect(() => {
     void load()
-  }, [load])
+    void loadCatalog()
+  }, [load, loadCatalog])
 
   const activeDay = days.find((day) => day.dayOfWeek === selectedDay) ?? null
   const trainingDays = days.filter((day) => !day.isRest).length
@@ -118,12 +147,7 @@ export function WorkoutPlanPage() {
     selectDay(DAYS[nextIndex].value, true)
   }
 
-  async function saveDay(input: {
-    name: string
-    isRest: boolean
-    notes: string | null
-    exercises: Array<{ name: string; sets: number; reps: string; notes: string | null }>
-  }) {
+  async function saveDay(input: WorkoutDayInput) {
     if (!activeDay) return
     setSaving(true)
     setFormError('')
@@ -134,8 +158,40 @@ export function WorkoutPlanPage() {
       await load(false)
     } catch (caught) {
       setFormError(errorMessage(caught))
+      if (caught instanceof ApiError && caught.code === 'WORKOUT_EXERCISE_NOT_FOUND') {
+        void loadCatalog()
+      }
     } finally {
       setSaving(false)
+    }
+  }
+
+  async function createSharedExercise(input: {
+    name: string
+    category: string
+    unit: string
+    color: string
+  }): Promise<Exercise> {
+    try {
+      const saved = await api.exercises.create(input)
+      setExerciseCatalog((current) => [...current, saved].sort((left, right) => left.sortOrder - right.sortOrder))
+      setCatalogError('')
+      toast(`${saved.name} added to Max lifts.`)
+      return saved
+    } catch (caught) {
+      if (caught instanceof ApiError && caught.code === 'EXERCISE_EXISTS') {
+        const refreshed = await api.exercises.list()
+        setExerciseCatalog(refreshed)
+        setCatalogError('')
+        const existing = refreshed.find(
+          (exercise) => exercise.name.trim().toLocaleLowerCase() === input.name.trim().toLocaleLowerCase(),
+        )
+        if (existing) {
+          toast(`${existing.name} was already in Max lifts and has been selected.`)
+          return existing
+        }
+      }
+      throw caught
     }
   }
 
@@ -144,7 +200,7 @@ export function WorkoutPlanPage() {
       <PageHeader
         eyebrow="WEEKLY ROUTINE"
         title="Workout plan"
-        description="Shape a repeatable week, keep every session focused, and make recovery part of the plan."
+        description="Build sessions from the same exercise library you use for Max lifts, then keep sets, reps, and recovery specific to each day."
         actions={(
           <Button
             icon={<Pencil size={17} />}
@@ -266,8 +322,13 @@ export function WorkoutPlanPage() {
         day={activeDay}
         busy={saving}
         error={formError}
+        exerciseCatalog={exerciseCatalog}
+        catalogLoading={catalogLoading}
+        catalogError={catalogError}
         onClose={() => { if (!saving) setEditorOpen(false) }}
         onSave={saveDay}
+        onCreateExercise={createSharedExercise}
+        onRetryCatalog={() => void loadCatalog()}
       />
     </div>
   )
@@ -290,26 +351,44 @@ function WorkoutDayModal({
   day,
   busy,
   error,
+  exerciseCatalog,
+  catalogLoading,
+  catalogError,
   onClose,
   onSave,
+  onCreateExercise,
+  onRetryCatalog,
 }: {
   open: boolean
   day: WorkoutDay | null
   busy: boolean
   error: string
+  exerciseCatalog: Exercise[]
+  catalogLoading: boolean
+  catalogError: string
   onClose: () => void
-  onSave: (input: {
+  onSave: (input: WorkoutDayInput) => Promise<void>
+  onCreateExercise: (input: {
     name: string
-    isRest: boolean
-    notes: string | null
-    exercises: Array<{ name: string; sets: number; reps: string; notes: string | null }>
-  }) => Promise<void>
+    category: string
+    unit: string
+    color: string
+  }) => Promise<Exercise>
+  onRetryCatalog: () => void
 }) {
   const [name, setName] = useState('')
   const [isRest, setIsRest] = useState(false)
   const [notes, setNotes] = useState('')
   const [exercises, setExercises] = useState<ExerciseDraft[]>([])
   const [localError, setLocalError] = useState('')
+  const [createForKey, setCreateForKey] = useState<string | null>(null)
+  const [newExerciseName, setNewExerciseName] = useState('')
+  const [newExerciseCategory, setNewExerciseCategory] = useState('Strength')
+  const [newExerciseUnit, setNewExerciseUnit] = useState('kg')
+  const [newExerciseColor, setNewExerciseColor] = useState(CHART_COLORS[1])
+  const [createError, setCreateError] = useState('')
+  const [creatingExercise, setCreatingExercise] = useState(false)
+  const [announcement, setAnnouncement] = useState('')
   const existingExerciseCount = day?.exercises.length ?? 0
 
   useEffect(() => {
@@ -319,14 +398,61 @@ function WorkoutDayModal({
     setNotes(day.notes ?? '')
     setExercises(day.exercises.length ? day.exercises.map(toDraft) : [blankExercise()])
     setLocalError('')
+    setCreateForKey(null)
+    setCreateError('')
+    setCreatingExercise(false)
+    setAnnouncement('')
   }, [day, open])
 
-  function updateExercise(key: string, field: keyof Omit<ExerciseDraft, 'key'>, value: string) {
+  function updateExercise<K extends keyof Omit<ExerciseDraft, 'key'>>(
+    key: string,
+    field: K,
+    value: ExerciseDraft[K],
+  ) {
     setExercises((current) => current.map((exercise) => exercise.key === key ? { ...exercise, [field]: value } : exercise))
   }
 
   function removeExercise(key: string) {
     setExercises((current) => current.filter((exercise) => exercise.key !== key))
+    if (createForKey === key) setCreateForKey(null)
+  }
+
+  function startCreatingExercise(key: string) {
+    setCreateForKey(key)
+    setLocalError('')
+    setNewExerciseName('')
+    setNewExerciseCategory('Strength')
+    setNewExerciseUnit('kg')
+    setNewExerciseColor(CHART_COLORS[1])
+    setCreateError('')
+    window.requestAnimationFrame(() => document.getElementById(`new-workout-exercise-name-${key}`)?.focus())
+  }
+
+  async function createExercise(key: string) {
+    setCreateError('')
+    if (!newExerciseName.trim() || !newExerciseCategory.trim() || !newExerciseUnit.trim()) {
+      setCreateError('Add a name, category, and unit for the new exercise.')
+      return
+    }
+    setCreatingExercise(true)
+    try {
+      const saved = await onCreateExercise({
+        name: newExerciseName.trim(),
+        category: newExerciseCategory.trim(),
+        unit: newExerciseUnit.trim(),
+        color: newExerciseColor,
+      })
+      setExercises((current) => current.map((exercise) => exercise.key === key
+        ? { ...exercise, exerciseId: saved.id, exerciseName: saved.name }
+        : exercise))
+      setCreateForKey(null)
+      setAnnouncement(`${saved.name} created and selected for exercise ${exercises.findIndex((exercise) => exercise.key === key) + 1}.`)
+      window.requestAnimationFrame(() => document.getElementById(`workout-exercise-select-${key}`)?.focus())
+    } catch (caught) {
+      setCreateError(errorMessage(caught))
+    } finally {
+      setCreatingExercise(false)
+    }
   }
 
   function submit(event: FormEvent) {
@@ -337,7 +463,7 @@ function WorkoutDayModal({
       return
     }
     const normalized = exercises.map((exercise) => ({
-      name: exercise.name.trim(),
+      exerciseId: exercise.exerciseId,
       sets: Number(exercise.sets),
       reps: exercise.reps.trim(),
       notes: exercise.notes.trim() || null,
@@ -346,29 +472,46 @@ function WorkoutDayModal({
       setLocalError('Add at least one exercise or mark this as a rest day.')
       return
     }
-    if (!isRest && normalized.some((exercise) => !exercise.name || exercise.sets < 1 || !exercise.reps)) {
-      setLocalError('Every exercise needs a name, at least one set, and at least one rep.')
+    if (!isRest && normalized.some((exercise) => !exercise.exerciseId || exercise.sets < 1 || !exercise.reps)) {
+      setLocalError('Choose a Max lifts exercise and add at least one set and rep for every movement.')
       return
     }
-    void onSave({ name: name.trim(), isRest, notes: notes.trim() || null, exercises: isRest ? [] : normalized })
+    if (!isRest && !catalogLoading && !catalogError && normalized.some(
+      (exercise) => !exerciseCatalog.some((catalogExercise) => catalogExercise.id === exercise.exerciseId),
+    )) {
+      setLocalError('One of these exercises is no longer in Max lifts. Choose another exercise or create it again.')
+      return
+    }
+    void onSave({
+      name: name.trim(),
+      isRest,
+      notes: notes.trim() || null,
+      exercises: isRest ? [] : normalized.map((exercise) => ({
+        ...exercise,
+        exerciseId: exercise.exerciseId as number,
+      })),
+    })
   }
+
+  const locked = busy || creatingExercise
 
   return (
     <Modal
       open={open}
-      onClose={onClose}
+      onClose={() => { if (!locked) onClose() }}
       eyebrow="WEEKLY ROUTINE"
       title={`Edit ${day ? dayLabel(day.dayOfWeek) : 'day'}`}
       size="large"
       footer={(
         <>
-          <Button type="button" variant="secondary" disabled={busy} onClick={onClose}>Cancel</Button>
-          <Button type="submit" form="workout-day-form" busy={busy}>Save day</Button>
+          <Button type="button" variant="secondary" disabled={locked} onClick={onClose}>Cancel</Button>
+          <Button type="submit" form="workout-day-form" busy={busy} disabled={creatingExercise}>Save day</Button>
         </>
       )}
     >
       <form id="workout-day-form" className="form-stack plan-form" onSubmit={submit}>
         {(localError || error) && <div className="form-alert" role="alert">{localError || error}</div>}
+        <span className="sr-only" aria-live="polite">{announcement}</span>
 
         <label className="plan-switch-row">
           <span className="plan-switch-row__icon"><BedDouble size={19} /></span>
@@ -386,22 +529,134 @@ function WorkoutDayModal({
 
         {!isRest && (
           <section className="plan-form-section" aria-labelledby="exercise-list-heading">
-            <header><div><span className="eyebrow">SESSION CONTENT</span><h3 id="exercise-list-heading">Exercises</h3></div><span>{exercises.length} {exercises.length === 1 ? 'movement' : 'movements'}</span></header>
+            <header><div><span className="eyebrow">SHARED EXERCISE LIBRARY</span><h3 id="exercise-list-heading">Exercises</h3></div><span>{exercises.length} {exercises.length === 1 ? 'movement' : 'movements'}</span></header>
+
+            {catalogLoading && (
+              <div className="exercise-library-status" role="status">
+                Loading your Max lifts exercises...
+              </div>
+            )}
+            {catalogError && (
+              <div className="exercise-library-status exercise-library-status--error" role="alert">
+                <span>Could not refresh Max lifts: {catalogError}</span>
+                <Button type="button" variant="ghost" onClick={onRetryCatalog}>Retry</Button>
+              </div>
+            )}
+
             <div className="exercise-editor-list">
               {exercises.map((exercise, index) => (
                 <fieldset className="exercise-editor" key={exercise.key}>
                   <legend>Exercise {index + 1}</legend>
-                  <button type="button" className="icon-button icon-button--danger exercise-editor__remove" onClick={() => removeExercise(exercise.key)} aria-label={`Remove exercise ${index + 1}`}><Trash2 size={16} /></button>
-                  <label className="field exercise-editor__name"><span>Exercise name</span><input value={exercise.name} onChange={(event) => updateExercise(exercise.key, 'name', event.target.value)} placeholder="e.g. Incline dumbbell press" maxLength={80} required /></label>
+                  <button type="button" className="icon-button icon-button--danger exercise-editor__remove" disabled={locked} onClick={() => removeExercise(exercise.key)} aria-label={`Remove exercise ${index + 1}`}><Trash2 size={16} /></button>
+                  <label className="field exercise-editor__name">
+                    <span>Max lifts exercise <small>Shared</small></span>
+                    <select
+                      id={`workout-exercise-select-${exercise.key}`}
+                      value={exercise.exerciseId ?? ''}
+                      onChange={(event) => {
+                        if (event.target.value === 'create') {
+                          startCreatingExercise(exercise.key)
+                          return
+                        }
+                        const exerciseId = Number(event.target.value)
+                        const selected = exerciseCatalog.find((item) => item.id === exerciseId)
+                        updateExercise(exercise.key, 'exerciseId', exerciseId || null)
+                        updateExercise(exercise.key, 'exerciseName', selected?.name ?? exercise.exerciseName)
+                        setCreateForKey(null)
+                      }}
+                      required
+                      disabled={locked}
+                    >
+                      <option value="" disabled>Choose an exercise</option>
+                      {exercise.exerciseId != null && !exerciseCatalog.some((item) => item.id === exercise.exerciseId) && (
+                        <option value={exercise.exerciseId} disabled={!catalogLoading && !catalogError}>
+                          {exercise.exerciseName} {!catalogLoading && !catalogError ? '(no longer available)' : '(currently selected)'}
+                        </option>
+                      )}
+                      {exerciseCatalog.map((item) => (
+                        <option value={item.id} key={item.id}>{item.name} · {item.unit}</option>
+                      ))}
+                      <option value="create">＋ Create a new shared exercise...</option>
+                    </select>
+                    <small>Choose it once here and it is ready for lift records too.</small>
+                  </label>
                   <div className="form-grid exercise-editor__numbers">
-                    <label className="field"><span>Sets</span><input type="number" min="1" max="100" step="1" value={exercise.sets} onChange={(event) => updateExercise(exercise.key, 'sets', event.target.value)} required /></label>
-                    <label className="field"><span>Reps</span><input value={exercise.reps} onChange={(event) => updateExercise(exercise.key, 'reps', event.target.value)} placeholder="e.g. 8-10" maxLength={30} required /></label>
+                    <label className="field"><span>Sets</span><input type="number" min="1" max="100" step="1" value={exercise.sets} onChange={(event) => updateExercise(exercise.key, 'sets', event.target.value)} required disabled={locked} /></label>
+                    <label className="field"><span>Reps</span><input value={exercise.reps} onChange={(event) => updateExercise(exercise.key, 'reps', event.target.value)} placeholder="e.g. 8-10" maxLength={30} required disabled={locked} /></label>
                   </div>
-                  <label className="field exercise-editor__notes"><span>Exercise notes <small>Optional</small></span><input value={exercise.notes} onChange={(event) => updateExercise(exercise.key, 'notes', event.target.value)} placeholder="Tempo, rest time, form cue..." maxLength={300} /></label>
+                  <label className="field exercise-editor__notes"><span>Exercise notes <small>Optional</small></span><input value={exercise.notes} onChange={(event) => updateExercise(exercise.key, 'notes', event.target.value)} placeholder="Tempo, rest time, form cue..." maxLength={300} disabled={locked} /></label>
+
+                  {createForKey === exercise.key && (
+                    <div
+                      className="shared-exercise-creator"
+                      role="group"
+                      aria-label={`Create a shared exercise for exercise ${index + 1}`}
+                      onKeyDown={(event) => {
+                        if (event.key !== 'Enter' || !(event.target instanceof HTMLInputElement) || event.target.type === 'color') return
+                        event.preventDefault()
+                        void createExercise(exercise.key)
+                      }}
+                    >
+                      <div className="shared-exercise-creator__header">
+                        <div><strong>Create a shared exercise</strong><small>It will appear here and under Max lifts.</small></div>
+                        <button
+                          type="button"
+                          className="icon-button"
+                          disabled={creatingExercise}
+                          onClick={() => { setCreateForKey(null); setCreateError('') }}
+                          aria-label="Cancel creating exercise"
+                        >
+                          <X size={15} />
+                        </button>
+                      </div>
+                      {createError && <div className="form-alert" role="alert">{createError}</div>}
+                      <label className="field">
+                        <span>Exercise name</span>
+                        <input
+                          id={`new-workout-exercise-name-${exercise.key}`}
+                          value={newExerciseName}
+                          onChange={(event) => setNewExerciseName(event.target.value)}
+                          placeholder="e.g. Incline dumbbell press"
+                          maxLength={100}
+                          disabled={creatingExercise}
+                        />
+                      </label>
+                      <div className="form-grid">
+                        <label className="field"><span>Category</span><input value={newExerciseCategory} onChange={(event) => setNewExerciseCategory(event.target.value)} placeholder="Strength" maxLength={40} disabled={creatingExercise} /></label>
+                        <label className="field"><span>Unit</span><input value={newExerciseUnit} onChange={(event) => setNewExerciseUnit(event.target.value)} placeholder="kg" maxLength={16} disabled={creatingExercise} /></label>
+                      </div>
+                      <label className="field">
+                        <span>Chart colour</span>
+                        <span className="color-input"><input type="color" value={newExerciseColor} onChange={(event) => setNewExerciseColor(event.target.value)} disabled={creatingExercise} /><b>{newExerciseColor.toUpperCase()}</b></span>
+                      </label>
+                      <div className="color-swatches" aria-label="Suggested chart colours">
+                        {CHART_COLORS.map((swatch) => (
+                          <button
+                            type="button"
+                            key={swatch}
+                            className={newExerciseColor === swatch ? 'is-active' : ''}
+                            style={{ backgroundColor: swatch }}
+                            onClick={() => setNewExerciseColor(swatch)}
+                            aria-label={`Use colour ${swatch}`}
+                            aria-pressed={newExerciseColor === swatch}
+                            disabled={creatingExercise}
+                          />
+                        ))}
+                      </div>
+                      <Button
+                        type="button"
+                        icon={<Plus size={16} />}
+                        busy={creatingExercise}
+                        onClick={() => void createExercise(exercise.key)}
+                      >
+                        Create and select
+                      </Button>
+                    </div>
+                  )}
                 </fieldset>
               ))}
             </div>
-            <Button type="button" variant="ghost" icon={<Plus size={16} />} onClick={() => setExercises((current) => [...current, blankExercise()])}>Add another exercise</Button>
+            <Button type="button" variant="ghost" icon={<Plus size={16} />} disabled={locked} onClick={() => setExercises((current) => [...current, blankExercise()])}>Add another exercise</Button>
           </section>
         )}
 

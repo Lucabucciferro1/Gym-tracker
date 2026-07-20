@@ -151,9 +151,10 @@ describe('sharing grants', () => {
         name: 'Push',
         isRest: false,
         notes: 'private workout note',
-        exercises: [{ name: 'Bench', sets: 4, reps: '6', notes: 'private exercise note' }],
+        exercises: [{ exerciseId, sets: 4, reps: '6', notes: 'private exercise note' }],
       })
       .expect(200);
+    await owner.agent.patch(`/api/exercises/${exerciseId}`).send({ name: 'Shared Bench' }).expect(200);
     await owner.agent
       .put('/api/meal-plan/settings')
       .send({
@@ -202,7 +203,11 @@ describe('sharing grants', () => {
     expect(shared.body.data.measurements[0].records[0]).toMatchObject({ value: 81.2, note: null });
     expect(shared.body.data.workoutPlan.days[0]).toMatchObject({
       notes: null,
-      exercises: [expect.objectContaining({ notes: null })],
+      exercises: [expect.objectContaining({
+        exerciseId,
+        name: 'Shared Bench',
+        notes: null,
+      })],
     });
     expect(shared.body.data.mealPlan.settings).toMatchObject({
       showCalories: false,

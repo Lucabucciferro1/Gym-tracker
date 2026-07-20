@@ -116,11 +116,26 @@ export interface AuditEvent {
 }
 
 export interface WorkoutExercise {
-  id?: number
+  id: number
+  exerciseId: number
   name: string
   sets: number
   reps: string
   notes: string | null
+}
+
+export interface WorkoutExerciseInput {
+  exerciseId: number
+  sets: number
+  reps: string
+  notes: string | null
+}
+
+export interface WorkoutDayInput {
+  name: string
+  isRest: boolean
+  notes: string | null
+  exercises: WorkoutExerciseInput[]
 }
 
 export interface WorkoutDay {

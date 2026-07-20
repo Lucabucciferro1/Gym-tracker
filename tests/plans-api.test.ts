@@ -62,6 +62,14 @@ describe('weekly workout plan', () => {
 
   it('replaces a single owned day and clears exercises when it becomes a rest day', async () => {
     const { agent: admin } = await setupAdmin();
+    const catalog = await admin.get('/api/exercises').expect(200);
+    const benchPress = catalog.body.data.exercises.find(
+      (exercise: { name: string }) => exercise.name === 'Bench Press',
+    );
+    const cableFly = await admin
+      .post('/api/exercises')
+      .send({ name: 'Cable Fly', category: 'Chest', unit: 'kg', color: '#123456' })
+      .expect(201);
     const updated = await admin
       .put('/api/workout-plan/0')
       .send({
@@ -69,8 +77,9 @@ describe('weekly workout plan', () => {
         isRest: false,
         notes: 'Private workout note',
         exercises: [
-          { name: 'Bench press', sets: 4, reps: '6-8', notes: 'Private exercise note' },
-          { name: 'Cable fly', sets: 3, reps: 12, notes: null },
+          { exerciseId: benchPress.id, sets: 4, reps: '6-8', notes: 'Private exercise note' },
+          { exerciseId: cableFly.body.data.exercise.id, sets: 3, reps: 12, notes: null },
+          { exerciseId: benchPress.id, sets: 2, reps: 'AMRAP', notes: 'Repeated occurrence' },
         ],
       })
       .expect(200);
@@ -80,8 +89,27 @@ describe('weekly workout plan', () => {
       isRest: false,
       notes: 'Private workout note',
       exercises: [
-        { name: 'Bench press', sets: 4, reps: '6-8', notes: 'Private exercise note' },
-        { name: 'Cable fly', sets: 3, reps: '12', notes: null },
+        {
+          exerciseId: benchPress.id,
+          name: 'Bench Press',
+          sets: 4,
+          reps: '6-8',
+          notes: 'Private exercise note',
+        },
+        {
+          exerciseId: cableFly.body.data.exercise.id,
+          name: 'Cable Fly',
+          sets: 3,
+          reps: '12',
+          notes: null,
+        },
+        {
+          exerciseId: benchPress.id,
+          name: 'Bench Press',
+          sets: 2,
+          reps: 'AMRAP',
+          notes: 'Repeated occurrence',
+        },
       ],
     });
 
@@ -91,11 +119,117 @@ describe('weekly workout plan', () => {
         name: 'Recovery',
         isRest: true,
         notes: 'Walk and stretch',
-        exercises: [{ name: 'Ignored stale exercise', sets: 1, reps: '1', notes: null }],
+        exercises: [{ exerciseId: benchPress.id, sets: 1, reps: '1', notes: null }],
       })
       .expect(200);
     expect(rest.body.data.day).toMatchObject({ name: 'Recovery', isRest: true, exercises: [] });
     expect(await database.prepare('SELECT COUNT(*) AS count FROM workout_exercises').get()).toEqual({ count: 0 });
+  });
+
+  it('strictly validates catalog ownership before replacing a day and keeps the prior plan on failure', async () => {
+    const { agent: admin } = await setupAdmin();
+    const member = await inviteAndActivate(admin, 'Member');
+    const adminCatalog = await admin.get('/api/exercises').expect(200);
+    const memberCatalog = await member.agent.get('/api/exercises').expect(200);
+    const adminExerciseId = adminCatalog.body.data.exercises[0].id as number;
+    const memberExerciseId = memberCatalog.body.data.exercises[0].id as number;
+    await admin
+      .put('/api/workout-plan/0')
+      .send({
+        name: 'Owned plan',
+        isRest: false,
+        notes: null,
+        exercises: [{ exerciseId: adminExerciseId, sets: 3, reps: '8', notes: null }],
+      })
+      .expect(200);
+
+    await admin
+      .put('/api/workout-plan/0')
+      .send({
+        name: 'Legacy payload',
+        isRest: false,
+        notes: null,
+        exercises: [{ name: 'Bench Press', sets: 3, reps: '8', notes: null }],
+      })
+      .expect(400);
+    await admin
+      .put('/api/workout-plan/0')
+      .send({
+        name: 'Cross-owner attempt',
+        isRest: false,
+        notes: null,
+        exercises: [{ exerciseId: memberExerciseId, sets: 3, reps: '8', notes: null }],
+      })
+      .expect(404)
+      .expect(({ body }: { body: unknown }) => {
+        expect(body).toMatchObject({ error: { code: 'WORKOUT_EXERCISE_NOT_FOUND' } });
+      });
+    await admin
+      .put('/api/workout-plan/0')
+      .send({
+        name: 'Unknown attempt',
+        isRest: false,
+        notes: null,
+        exercises: [{ exerciseId: 999_999, sets: 3, reps: '8', notes: null }],
+      })
+      .expect(404);
+    await admin
+      .put('/api/workout-plan/0')
+      .send({
+        name: 'Unexpected occurrence ID',
+        isRest: false,
+        notes: null,
+        exercises: [{ id: 1, exerciseId: adminExerciseId, sets: 3, reps: '8', notes: null }],
+      })
+      .expect(400);
+
+    const unchanged = await admin.get('/api/workout-plan').expect(200);
+    expect(unchanged.body.data.days[0]).toMatchObject({
+      name: 'Owned plan',
+      isRest: false,
+      exercises: [{ exerciseId: adminExerciseId, sets: 3, reps: '8' }],
+    });
+    expect(await database.prepare(`
+      SELECT COUNT(*) AS count FROM workout_exercises
+    `).get()).toEqual({ count: 1 });
+  });
+
+  it('propagates catalog renames and blocks deletion until every workout occurrence is removed', async () => {
+    const { agent: admin } = await setupAdmin();
+    const catalog = await admin.get('/api/exercises').expect(200);
+    const exerciseId = catalog.body.data.exercises[0].id as number;
+    await admin
+      .post(`/api/exercises/${exerciseId}/lifts`)
+      .send({ weight: 100, reps: 5 })
+      .expect(201);
+    await admin
+      .put('/api/workout-plan/0')
+      .send({
+        name: 'Strength',
+        isRest: false,
+        notes: null,
+        exercises: [{ exerciseId, sets: 5, reps: '5', notes: null }],
+      })
+      .expect(200);
+
+    await admin.patch(`/api/exercises/${exerciseId}`).send({ name: 'Competition Bench' }).expect(200);
+    const renamedPlan = await admin.get('/api/workout-plan').expect(200);
+    expect(renamedPlan.body.data.days[0].exercises[0]).toMatchObject({
+      exerciseId,
+      name: 'Competition Bench',
+    });
+    const blocked = await admin.delete(`/api/exercises/${exerciseId}`).expect(409);
+    expect(blocked.body).toMatchObject({
+      error: { code: 'EXERCISE_IN_WORKOUT', details: { dayOfWeeks: [0] } },
+    });
+    expect((await admin.get(`/api/exercises/${exerciseId}/lifts`).expect(200)).body.data.lifts).toHaveLength(1);
+
+    await admin
+      .put('/api/workout-plan/0')
+      .send({ name: 'Recovery', isRest: true, notes: null, exercises: [] })
+      .expect(200);
+    await admin.delete(`/api/exercises/${exerciseId}`).expect(200);
+    await admin.get(`/api/exercises/${exerciseId}/lifts`).expect(404);
   });
 });
 
@@ -178,7 +312,12 @@ describe('weekly meal plan', () => {
         name: 'Legs',
         isRest: false,
         notes: null,
-        exercises: [{ name: 'Squat', sets: 5, reps: '5', notes: null }],
+        exercises: [{
+          exerciseId: (await member.agent.get('/api/exercises').expect(200)).body.data.exercises[0].id,
+          sets: 5,
+          reps: '5',
+          notes: null,
+        }],
       })
       .expect(200);
     await member.agent
@@ -288,7 +427,7 @@ describe('saved BMR profile', () => {
 
     const exported = await admin.get('/api/export').expect(200);
     expect(exported.body.data).toMatchObject({
-      formatVersion: 4,
+      formatVersion: 5,
       bmrProfile: updated.body.data.bmr,
     });
 

@@ -535,7 +535,7 @@ export function LiftsPage() {
         open={Boolean(deleteTarget)}
         title={deleteTarget?.kind === 'exercise' ? `Remove ${deleteTarget.item.name}?` : 'Delete this lift record?'}
         message={deleteTarget?.kind === 'exercise'
-          ? 'This also permanently deletes every lift saved for this exercise.'
+          ? 'This permanently deletes every saved lift. If the exercise is used in your Workout Plan, remove those planned entries first.'
           : 'This record will be permanently removed from the chart and history.'}
         busy={deleting}
         onClose={() => setDeleteTarget(null)}
@@ -588,7 +588,7 @@ function ExerciseModal({
     >
       <form id="exercise-form" className="form-stack" onSubmit={submit}>
         {error && <div className="form-alert" role="alert">{error}</div>}
-        <label className="field"><span>Exercise name</span><input value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. Incline bench press" maxLength={80} required data-modal-autofocus /></label>
+        <label className="field"><span>Exercise name</span><input value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. Incline bench press" maxLength={100} required data-modal-autofocus /></label>
         <div className="form-grid">
           <label className="field"><span>Category</span><input value={category} onChange={(event) => setCategory(event.target.value)} placeholder="Strength" maxLength={40} required /></label>
           <label className="field">

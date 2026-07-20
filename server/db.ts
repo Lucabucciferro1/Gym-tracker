@@ -334,8 +334,8 @@ export async function initializeDatabase(database: Database): Promise<void> {
     CREATE TABLE IF NOT EXISTS workout_exercises (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       workout_day_id INTEGER NOT NULL REFERENCES workout_days(id) ON DELETE CASCADE,
+      exercise_id INTEGER NOT NULL REFERENCES exercises(id) ON DELETE RESTRICT,
       position INTEGER NOT NULL DEFAULT 0,
-      name TEXT NOT NULL,
       sets INTEGER NOT NULL CHECK (sets > 0),
       reps TEXT NOT NULL,
       notes TEXT,
@@ -486,6 +486,8 @@ export async function initializeDatabase(database: Database): Promise<void> {
     }
   });
 
+  await migrateWorkoutExerciseCatalogLinks(database);
+
   // Existing installations created before actor snapshots need a safe additive migration.
   await database.transaction(async () => {
     const auditColumns = await database.prepare('PRAGMA table_info(audit_log)').all() as unknown as Array<{ name: string }>;
@@ -515,6 +517,162 @@ export async function initializeDatabase(database: Database): Promise<void> {
     await seedUserMobileNavigation(database, userId);
     await readUserMobileNavigation(database, userId, user.role === 'admin');
   }
+}
+
+async function migrateWorkoutExerciseCatalogLinks(database: Database): Promise<void> {
+  await database.transaction(async () => {
+    const columns = await database.prepare('PRAGMA table_info(workout_exercises)')
+      .all() as unknown as Array<{ name: string; notnull: number }>;
+    const foreignKeys = await database.prepare('PRAGMA foreign_key_list(workout_exercises)')
+      .all() as unknown as Array<{ table: string; from: string; to: string; on_delete: string }>;
+    const exerciseIdColumn = columns.find((column) => column.name === 'exercise_id');
+    const hasLegacyName = columns.some((column) => column.name === 'name');
+    const hasRequiredExerciseForeignKey = foreignKeys.some((foreignKey) => (
+      foreignKey.table === 'exercises'
+      && foreignKey.from === 'exercise_id'
+      && foreignKey.to === 'id'
+      && foreignKey.on_delete === 'RESTRICT'
+    ));
+    if (exerciseIdColumn?.notnull === 1 && !hasLegacyName && hasRequiredExerciseForeignKey) {
+      await database.prepare(`
+        CREATE INDEX IF NOT EXISTS idx_workout_exercises_exercise
+          ON workout_exercises(exercise_id)
+      `).run();
+      return;
+    }
+
+    if (hasLegacyName) {
+      const invalidName = await database.prepare(`
+        SELECT id FROM workout_exercises
+        WHERE LENGTH(TRIM(name)) = 0 OR LENGTH(TRIM(name)) > 100
+        LIMIT 1
+      `).get() as unknown as { id: number } | undefined;
+      if (invalidName) {
+        throw new Error(`Legacy workout exercise ${invalidName.id} has an invalid name`);
+      }
+
+      const unmatchedNames = await database.prepare(`
+        WITH legacy_names AS (
+          SELECT wd.user_id, MIN(we.id) AS first_workout_exercise_id
+          FROM workout_exercises we
+          JOIN workout_days wd ON wd.id = we.workout_day_id
+          GROUP BY wd.user_id, TRIM(we.name) COLLATE NOCASE
+        )
+        SELECT legacy_names.user_id, TRIM(we.name) AS name
+        FROM legacy_names
+        JOIN workout_exercises we ON we.id = legacy_names.first_workout_exercise_id
+        LEFT JOIN exercises e
+          ON e.user_id = legacy_names.user_id
+         AND TRIM(e.name) = TRIM(we.name) COLLATE NOCASE
+        WHERE e.id IS NULL
+        ORDER BY legacy_names.user_id ASC, legacy_names.first_workout_exercise_id ASC
+      `).all() as unknown as Array<{ user_id: number; name: string }>;
+      const timestamp = new Date().toISOString();
+      const insertExercise = database.prepare(`
+        INSERT OR IGNORE INTO exercises (
+          user_id, name, category, unit, color, sort_order, created_at, updated_at
+        )
+        SELECT users.id, ?, 'Strength', 'kg', '#f97316',
+          (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM exercises WHERE user_id = users.id),
+          ?, ?
+        FROM users WHERE users.id = ?
+      `);
+      for (const legacy of unmatchedNames) {
+        const result = await insertExercise.run(
+          legacy.name,
+          timestamp,
+          timestamp,
+          Number(legacy.user_id),
+        );
+        if (result.changes !== 1) {
+          const matched = await database.prepare(`
+            SELECT id FROM exercises
+            WHERE user_id = ? AND TRIM(name) = ? COLLATE NOCASE
+          `).get(Number(legacy.user_id), legacy.name);
+          if (!matched) throw new Error('Legacy workout exercise could not be added to its owner catalog');
+        }
+      }
+    }
+
+    await database.prepare('DROP TABLE IF EXISTS workout_exercises_catalog_migration').run();
+    await database.prepare(`
+      CREATE TABLE workout_exercises_catalog_migration (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        workout_day_id INTEGER NOT NULL REFERENCES workout_days(id) ON DELETE CASCADE,
+        exercise_id INTEGER NOT NULL REFERENCES exercises(id) ON DELETE RESTRICT,
+        position INTEGER NOT NULL DEFAULT 0,
+        sets INTEGER NOT NULL CHECK (sets > 0),
+        reps TEXT NOT NULL,
+        notes TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+    `).run();
+    if (hasLegacyName) {
+      await database.prepare(`
+        INSERT INTO workout_exercises_catalog_migration (
+          id, workout_day_id, exercise_id, position, sets, reps, notes, created_at, updated_at
+        )
+        SELECT we.id, we.workout_day_id, e.id, we.position, we.sets, we.reps,
+          we.notes, we.created_at, we.updated_at
+        FROM workout_exercises we
+        JOIN workout_days wd ON wd.id = we.workout_day_id
+        JOIN exercises e ON e.id = (
+          SELECT MIN(matched.id)
+          FROM exercises matched
+          WHERE matched.user_id = wd.user_id
+            AND TRIM(matched.name) = TRIM(we.name) COLLATE NOCASE
+        )
+      `).run();
+    } else if (exerciseIdColumn) {
+      await database.prepare(`
+        INSERT INTO workout_exercises_catalog_migration (
+          id, workout_day_id, exercise_id, position, sets, reps, notes, created_at, updated_at
+        )
+        SELECT we.id, we.workout_day_id, we.exercise_id, we.position, we.sets, we.reps,
+          we.notes, we.created_at, we.updated_at
+        FROM workout_exercises we
+        JOIN workout_days wd ON wd.id = we.workout_day_id
+        JOIN exercises e ON e.id = we.exercise_id AND e.user_id = wd.user_id
+      `).run();
+    } else {
+      throw new Error('Workout exercise schema has neither a legacy name nor an exercise link');
+    }
+
+    const sourceCount = await database.prepare('SELECT COUNT(*) AS count FROM workout_exercises')
+      .get() as unknown as { count: number };
+    const migratedCount = await database.prepare('SELECT COUNT(*) AS count FROM workout_exercises_catalog_migration')
+      .get() as unknown as { count: number };
+    if (Number(sourceCount.count) !== Number(migratedCount.count)) {
+      throw new Error('Legacy workout exercise migration did not preserve every row');
+    }
+    const ownershipMismatch = await database.prepare(`
+      SELECT migrated.id
+      FROM workout_exercises_catalog_migration migrated
+      JOIN workout_days wd ON wd.id = migrated.workout_day_id
+      JOIN exercises e ON e.id = migrated.exercise_id
+      WHERE wd.user_id != e.user_id
+      LIMIT 1
+    `).get();
+    if (ownershipMismatch) throw new Error('Legacy workout exercise migration found a cross-user link');
+    const foreignKeyFailure = await database.prepare(`
+      PRAGMA foreign_key_check(workout_exercises_catalog_migration)
+    `).get();
+    if (foreignKeyFailure) throw new Error('Legacy workout exercise migration failed its foreign-key check');
+
+    await database.prepare('DROP TABLE workout_exercises').run();
+    await database.prepare(`
+      ALTER TABLE workout_exercises_catalog_migration RENAME TO workout_exercises
+    `).run();
+    await database.prepare(`
+      CREATE INDEX IF NOT EXISTS idx_workout_exercises_day
+        ON workout_exercises(workout_day_id, position)
+    `).run();
+    await database.prepare(`
+      CREATE INDEX IF NOT EXISTS idx_workout_exercises_exercise
+        ON workout_exercises(exercise_id)
+    `).run();
+  });
 }
 
 export async function seedUserDefaults(database: Database, userId: number): Promise<void> {

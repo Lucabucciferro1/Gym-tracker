@@ -77,7 +77,7 @@ The repository ignores local dependencies, compiled output, environment files, S
 - Responsive progress charts with date-range filtering
 - A per-user mobile bottom bar with four selectable, ordered shortcuts and a permanent More gateway
 - Editing, deletion, notes, and unit-aware records
-- A customizable seven-day workout plan with named sessions, exercises, notes, and explicit rest days
+- A customizable seven-day workout plan linked to the Max lifts exercise library, with named sessions, per-session sets, reps, notes, and explicit rest days
 - A seven-day meal plan with optional calories, macro targets, independently switchable calorie/macro displays, and a saved BMR estimate that can use a selected weight check-in or manual weight
 - Read-only friend sharing with separate permissions for measurements, lifts, workouts, and meals; access can be changed or revoked at any time
 - Role-protected account administration, including user disabling, deletion, and invitation reset

@@ -596,6 +596,72 @@
   grid-column: 1 / -1;
 }
 
+.exercise-library-status {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 11px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.exercise-library-status--error {
+  border-color: #efc9c5;
+  background: var(--danger-soft);
+  color: #963e3e;
+}
+
+.exercise-library-status .button {
+  min-height: 34px;
+  flex: 0 0 auto;
+  padding-inline: 10px;
+}
+
+.shared-exercise-creator {
+  display: flex;
+  grid-column: 1 / -1;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid #b9c9bb;
+  border-radius: 11px;
+  background: var(--primary-soft);
+}
+
+.shared-exercise-creator__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.shared-exercise-creator__header > div {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.shared-exercise-creator__header strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.shared-exercise-creator__header small {
+  color: var(--text-muted);
+  font-size: 10.5px;
+}
+
+.shared-exercise-creator > .button {
+  align-self: flex-start;
+}
+
 .plan-form-section > .button {
   width: 100%;
   margin-top: 11px;
@@ -1310,6 +1376,14 @@
 
   .exercise-editor__notes {
     grid-column: auto;
+  }
+
+  .shared-exercise-creator {
+    grid-column: auto;
+  }
+
+  .shared-exercise-creator > .button {
+    width: 100%;
   }
 
   .nutrition-total-grid {

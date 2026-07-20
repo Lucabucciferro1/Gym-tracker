@@ -1031,13 +1031,13 @@ function registerBodyPartRoutes(app: Express, database: Database): void {
 
 function registerExerciseRoutes(app: Express, database: Database): void {
   const exerciseCreateSchema = z.object({
-    name: z.string().trim().min(1).max(80),
+    name: z.string().trim().min(1).max(100),
     category: z.string().trim().min(1).max(40).default('Strength'),
     unit: z.string().trim().min(1).max(16).default('kg'),
     color: colorSchema.default('#f97316'),
   }).strict();
   const exerciseUpdateSchema = z.object({
-    name: z.string().trim().min(1).max(80).optional(),
+    name: z.string().trim().min(1).max(100).optional(),
     category: z.string().trim().min(1).max(40).optional(),
     unit: z.string().trim().min(1).max(16).optional(),
     color: colorSchema.optional(),
@@ -1233,10 +1233,27 @@ function registerExerciseRoutes(app: Express, database: Database): void {
   app.delete('/api/exercises/:exerciseId', async (request, response) => {
     const auth = getAuth(response);
     const id = parseId(request.params.exerciseId);
-    const current = await database.prepare('SELECT name FROM exercises WHERE id = ? AND user_id = ?')
-      .get(id, auth.user.id) as unknown as { name: string } | undefined;
-    if (!current) throw new HttpError(404, 'EXERCISE_NOT_FOUND', 'Exercise not found');
     await runTransaction(database, async () => {
+      const current = await database.prepare('SELECT name FROM exercises WHERE id = ? AND user_id = ?')
+        .get(id, auth.user.id) as unknown as { name: string } | undefined;
+      if (!current) throw new HttpError(404, 'EXERCISE_NOT_FOUND', 'Exercise not found');
+      const linkedDays = await database.prepare(`
+        SELECT wd.day_of_week
+        FROM workout_exercises we
+        JOIN workout_days wd ON wd.id = we.workout_day_id
+        JOIN exercises e ON e.id = we.exercise_id AND e.user_id = wd.user_id
+        WHERE we.exercise_id = ? AND e.user_id = ?
+        GROUP BY wd.day_of_week
+        ORDER BY wd.day_of_week ASC
+      `).all(id, auth.user.id) as unknown as Array<{ day_of_week: number }>;
+      if (linkedDays.length > 0) {
+        throw new HttpError(
+          409,
+          'EXERCISE_IN_WORKOUT',
+          'Remove this exercise from your workout plan before deleting it',
+          { dayOfWeeks: linkedDays.map((day) => Number(day.day_of_week)) },
+        );
+      }
       await database.prepare('DELETE FROM lift_records WHERE exercise_id = ?').run(id);
       await database.prepare('DELETE FROM exercises WHERE id = ? AND user_id = ?').run(id, auth.user.id);
       await writeAudit(database, {
@@ -1361,9 +1378,24 @@ async function readWorkoutPlan(database: Database, userId: number, redactNotes =
   return {
     days: await Promise.all(days.map(async (day) => {
       const exercises = await database.prepare(`
-        SELECT * FROM workout_exercises
-        WHERE workout_day_id = ? ORDER BY position ASC, id ASC
-      `).all(day.id as number) as unknown as Record<string, unknown>[];
+        SELECT
+          we.id,
+          we.exercise_id,
+          we.position,
+          we.sets,
+          we.reps,
+          we.notes,
+          we.created_at,
+          we.updated_at,
+          e.name
+        FROM workout_exercises we
+        JOIN workout_days owned_day
+          ON owned_day.id = we.workout_day_id AND owned_day.user_id = ?
+        JOIN exercises e
+          ON e.id = we.exercise_id AND e.user_id = owned_day.user_id
+        WHERE we.workout_day_id = ?
+        ORDER BY we.position ASC, we.id ASC
+      `).all(userId, day.id as number) as unknown as Record<string, unknown>[];
       return {
         dayOfWeek: Number(day.day_of_week),
         name: String(day.name),
@@ -1371,6 +1403,7 @@ async function readWorkoutPlan(database: Database, userId: number, redactNotes =
         notes: redactNotes || day.notes == null ? null : String(day.notes),
         exercises: exercises.map((exercise) => ({
           id: Number(exercise.id),
+          exerciseId: Number(exercise.exercise_id),
           name: String(exercise.name),
           sets: Number(exercise.sets),
           reps: String(exercise.reps),
@@ -1383,8 +1416,7 @@ async function readWorkoutPlan(database: Database, userId: number, redactNotes =
 
 function registerWorkoutPlanRoutes(app: Express, database: Database): void {
   const exerciseSchema = z.object({
-    id: z.number().int().positive().optional(),
-    name: z.string().trim().min(1).max(100),
+    exerciseId: z.number().int().positive(),
     sets: z.number().int().min(1).max(100),
     reps: z.union([
       z.string().trim().min(1).max(40),
@@ -1418,6 +1450,21 @@ function registerWorkoutPlanRoutes(app: Express, database: Database): void {
     const timestamp = now();
 
     await runTransaction(database, async () => {
+      const exerciseIds = [...new Set(input.exercises.map((exercise) => exercise.exerciseId))];
+      if (exerciseIds.length > 0) {
+        const placeholders = exerciseIds.map(() => '?').join(', ');
+        const ownedExercises = await database.prepare(`
+          SELECT id FROM exercises
+          WHERE user_id = ? AND id IN (${placeholders})
+        `).all(auth.user.id, ...exerciseIds) as unknown as Array<{ id: number }>;
+        if (ownedExercises.length !== exerciseIds.length) {
+          throw new HttpError(
+            404,
+            'WORKOUT_EXERCISE_NOT_FOUND',
+            'One or more workout exercises were not found in your exercise catalog',
+          );
+        }
+      }
       await database.prepare(`
         UPDATE workout_days
         SET name = ?, is_rest = ?, notes = ?, updated_at = ?
@@ -1439,7 +1486,7 @@ function registerWorkoutPlanRoutes(app: Express, database: Database): void {
         const values = exercises.flatMap((exercise, position) => [
           day.id,
           position,
-          exercise.name,
+          exercise.exerciseId,
           exercise.sets,
           exercise.reps,
           exercise.notes?.trim() || null,
@@ -1448,7 +1495,7 @@ function registerWorkoutPlanRoutes(app: Express, database: Database): void {
         ]);
         await database.prepare(`
           INSERT INTO workout_exercises (
-            workout_day_id, position, name, sets, reps, notes, created_at, updated_at
+            workout_day_id, position, exercise_id, sets, reps, notes, created_at, updated_at
           ) VALUES ${placeholders}
         `).run(...values);
       }
@@ -2403,15 +2450,16 @@ function registerAdminRoutes(app: Express, database: Database): void {
       `).run(userId);
       await database.prepare('DELETE FROM body_parts WHERE user_id = ?').run(userId);
       await database.prepare(`
+        DELETE FROM workout_exercises
+        WHERE workout_day_id IN (SELECT id FROM workout_days WHERE user_id = ?)
+           OR exercise_id IN (SELECT id FROM exercises WHERE user_id = ?)
+      `).run(userId, userId);
+      await database.prepare('DELETE FROM workout_days WHERE user_id = ?').run(userId);
+      await database.prepare(`
         DELETE FROM lift_records
         WHERE exercise_id IN (SELECT id FROM exercises WHERE user_id = ?)
       `).run(userId);
       await database.prepare('DELETE FROM exercises WHERE user_id = ?').run(userId);
-      await database.prepare(`
-        DELETE FROM workout_exercises
-        WHERE workout_day_id IN (SELECT id FROM workout_days WHERE user_id = ?)
-      `).run(userId);
-      await database.prepare('DELETE FROM workout_days WHERE user_id = ?').run(userId);
       await database.prepare('DELETE FROM meals WHERE user_id = ?').run(userId);
       await database.prepare('DELETE FROM bmr_profiles WHERE user_id = ?').run(userId);
       await database.prepare('DELETE FROM meal_plan_settings WHERE user_id = ?').run(userId);
@@ -2524,7 +2572,7 @@ function registerExportRoute(app: Express, database: Database): void {
 
     response.setHeader('Content-Disposition', `attachment; filename="forge-export-${new Date().toISOString().slice(0, 10)}.json"`);
     sendData(response, {
-      formatVersion: 4,
+      formatVersion: 5,
       exportedAt: now(),
       user: auth.user,
       bodyParts,

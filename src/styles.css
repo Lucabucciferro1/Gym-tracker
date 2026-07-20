@@ -1528,7 +1528,9 @@ td strong {
   }
 }
 
-.field input:disabled {
+.field input:disabled,
+.field textarea:disabled,
+.field select:disabled {
   background: var(--surface-soft);
   color: var(--text-muted);
 }

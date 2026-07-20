@@ -97,6 +97,12 @@ its records first to change the unit.
 personalBest, latestWeight, latestReps, latestRecordedAt }`. `lift` is `{ id, exerciseId,
 weight, reps, recordedAt, note, createdAt, updatedAt }`.
 
+Exercise names are 1-100 characters. The exercise catalog is also the canonical source for
+workout-plan exercise names. Renaming an exercise therefore updates its name everywhere it is
+shown in the workout plan. Deleting an exercise used by one or more workout days returns
+`409 EXERCISE_IN_WORKOUT` with `{ dayOfWeeks }`; remove those occurrences first. If no workout
+occurrence uses it, deletion retains the existing behavior of deleting its lift records too.
+
 The reorder body must contain every exercise ID owned by the signed-in user exactly once.
 Duplicates, missing IDs, extra IDs, and IDs owned by another user return
 `400 ORDER_IDS_MISMATCH`; no positions are changed. A newly created exercise is appended.
@@ -113,12 +119,23 @@ Day numbers use `0 = Monday` through `6 = Sunday`.
 | GET | `/api/workout-plan` | - | `{ days }` |
 | PUT | `/api/workout-plan/:dayOfWeek` | `{ name, isRest, notes?, exercises }` | `{ day }` |
 
-A workout day is `{ dayOfWeek, name, isRest, notes, exercises }`. An exercise is
-`{ id, name, sets, reps, notes }`; `reps` is returned as a string and can be sent as a
-non-empty string or positive number. PUT replaces the day's exercise list. If `isRest` is
-true, the stored exercise list is cleared regardless of the submitted list.
+A workout day is `{ dayOfWeek, name, isRest, notes, exercises }`. Each submitted exercise is
+strictly `{ exerciseId, sets, reps, notes? }`; names and occurrence IDs are not accepted.
+`exerciseId` must identify an exercise in the signed-in user's max-lift catalog. Missing IDs and
+IDs owned by another user both return `404 WORKOUT_EXERCISE_NOT_FOUND` before any part of the
+day is changed. `reps` can be a non-empty string or positive number and is returned as a string.
+
+A returned workout exercise is `{ id, exerciseId, name, sets, reps, notes }`, where `id` is the
+plan occurrence and `name` is joined from the canonical catalog. The same catalog exercise may
+appear repeatedly in one day or across multiple days with different prescriptions. PUT replaces
+the day's occurrence list. If `isRest` is true, the stored list is cleared after all submitted
+exercise IDs have passed ownership validation.
 
 Every account has exactly seven seeded workout days, initially named `Rest day`.
+Legacy name-only workout rows are migrated atomically. Matching trims surrounding whitespace and
+uses the catalog's case-insensitive comparison within the same owner. An unmatched name creates
+exactly one catalog exercise for that owner, preserving names up to the former 100-character
+limit and using `Strength`, `kg`, and `#f97316` as its category, unit, and color defaults.
 
 ## Meal plan
 
@@ -184,6 +201,8 @@ owner's saved resource order. It is a read-only projection:
 
 - Measurement and lift record notes are always `null`.
 - Workout day and exercise notes are always `null`.
+- Shared workout occurrences retain their owner-scoped `exerciseId` and current canonical name;
+  the ID grants no mutation access.
 - Meal descriptions are always `null`.
 - When the owner has `showCalories: false`, shared calorie targets/values are `null` and
   shared calorie totals are zero.
@@ -218,9 +237,11 @@ meal-plan content remain private.
 
 ## Export, deletion, and health
 
-- `GET /api/export` downloads format version 4 for the signed-in user as
+- `GET /api/export` downloads format version 5 for the signed-in user as
   `{ formatVersion, exportedAt, user, bodyParts, exercises, workoutPlan, mealPlan, bmrProfile, mobileNavigation, sharing }`.
   Body parts and exercises retain the user's saved resource order and include `sortOrder`.
+  Workout occurrences include `exerciseId`, which references the matching item in the top-level
+  `exercises` catalog; their returned names are the current canonical catalog names.
   `mobileNavigation` is `{ items }` and contains only the signed-in user's saved destinations.
   `sharing` contains only the user's outgoing/incoming permission metadata, never another
   user's progress records.

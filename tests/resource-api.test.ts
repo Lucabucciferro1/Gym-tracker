@@ -207,11 +207,25 @@ describe('private data export', () => {
       .post(`/api/exercises/${exercise.body.data.exercise.id}/lifts`)
       .send({ weight: 70, reps: 3, recordedAt: '2026-07-02', note: 'member lift' })
       .expect(201);
+    await member
+      .put('/api/workout-plan/0')
+      .send({
+        name: 'Exported push day',
+        isRest: false,
+        notes: 'private workout note',
+        exercises: [{
+          exerciseId: exercise.body.data.exercise.id,
+          sets: 4,
+          reps: '6-8',
+          notes: 'private prescription note',
+        }],
+      })
+      .expect(200);
 
     const memberExport = await member.get('/api/export').expect(200);
     expect(memberExport.headers['content-disposition']).toMatch(/^attachment; filename="forge-export-\d{4}-\d{2}-\d{2}\.json"$/);
     expect(memberExport.body.data).toMatchObject({
-      formatVersion: 4,
+      formatVersion: 5,
       user: { username: 'Member', role: 'user' },
       bodyParts: [{
         name: 'Exported waist',
@@ -227,6 +241,16 @@ describe('private data export', () => {
       },
     });
     expect(memberExport.body.data.workoutPlan.days).toHaveLength(7);
+    expect(memberExport.body.data.workoutPlan.days[0]).toMatchObject({
+      name: 'Exported push day',
+      exercises: [{
+        exerciseId: exercise.body.data.exercise.id,
+        name: 'Exported press',
+        sets: 4,
+        reps: '6-8',
+        notes: 'private prescription note',
+      }],
+    });
     expect(memberExport.body.data.mealPlan.days).toHaveLength(7);
     expect(memberExport.body.data.mealPlan.settings).toEqual({
       showCalories: true,

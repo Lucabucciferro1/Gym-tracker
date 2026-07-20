@@ -18,6 +18,7 @@ import type {
   SharingOverview,
   User,
   WorkoutDay,
+  WorkoutDayInput,
   WorkoutPlan,
 } from './types'
 
@@ -245,7 +246,7 @@ export const api = {
     get: () => request<WorkoutPlan>('/api/workout-plan'),
     updateDay: (
       dayOfWeek: number,
-      input: Pick<WorkoutDay, 'name' | 'isRest' | 'notes' | 'exercises'>,
+      input: WorkoutDayInput,
     ) => request<{ day: WorkoutDay }>(`/api/workout-plan/${dayOfWeek}`, {
       method: 'PUT',
       body: json(input),
