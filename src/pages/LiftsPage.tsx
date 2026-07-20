@@ -9,6 +9,7 @@ import {
   MoreHorizontal,
   Pencil,
   Plus,
+  Search,
   Target,
   Trash2,
   Trophy,
@@ -28,6 +29,12 @@ import {
   RangeSelector,
 } from '../components/ui'
 import { useToast } from '../context/ToastContext'
+import {
+  exerciseGroupOptions,
+  groupExercises,
+  organizeExerciseLibrary,
+  type ExerciseLibrarySort,
+} from '../exerciseLibrary'
 import { CHART_COLORS, type DateRange, type Exercise, type Lift } from '../types'
 import {
   dateInput,
@@ -68,6 +75,9 @@ export function LiftsPage() {
   const [savingOrder, setSavingOrder] = useState(false)
   const [orderError, setOrderError] = useState('')
   const [orderAnnouncement, setOrderAnnouncement] = useState('')
+  const [exerciseQuery, setExerciseQuery] = useState('')
+  const [groupFilter, setGroupFilter] = useState('all')
+  const [librarySort, setLibrarySort] = useState<ExerciseLibrarySort>('group')
   const liftRequest = useRef(0)
   const pendingRecordAfterCreate = useRef(false)
 
@@ -133,12 +143,25 @@ export function LiftsPage() {
   }, [exercises.length, loadingExercises, searchParams, setSearchParams])
 
   const filteredLifts = useMemo(() => filterByRange(lifts, range), [lifts, range])
+  const groupOptions = useMemo(() => exerciseGroupOptions(exercises), [exercises])
+  const visibleExercises = useMemo(() => organizeExerciseLibrary(exercises, {
+    query: exerciseQuery,
+    group: groupFilter,
+    sort: librarySort,
+  }), [exerciseQuery, exercises, groupFilter, librarySort])
+  const visibleGroups = useMemo(() => groupExercises(visibleExercises), [visibleExercises])
+  const filtersActive = Boolean(exerciseQuery.trim()) || groupFilter !== 'all'
   const personalBest = lifts.reduce<Lift | null>((best, lift) => (!best || lift.weight > best.weight ? lift : best), null)
   const latest = lifts.at(-1)
   const previous = lifts.at(-2)
   const latestEstimated = latest ? estimatedOneRepMax(latest.weight, latest.reps) : null
   const previousEstimated = previous ? estimatedOneRepMax(previous.weight, previous.reps) : null
   const latestChange = percentChange(latestEstimated, previousEstimated)
+
+  useEffect(() => {
+    if (groupFilter === 'all' || groupOptions.some((group) => group.key === groupFilter)) return
+    setGroupFilter('all')
+  }, [groupFilter, groupOptions])
 
   function openNewExercise() {
     setEditingExercise(null)
@@ -170,6 +193,8 @@ export function LiftsPage() {
       const saved = editingExercise
         ? await api.exercises.update(editingExercise.id, input)
         : await api.exercises.create(input)
+      setExerciseQuery('')
+      setGroupFilter('all')
       setExerciseModalOpen(false)
       toast(editingExercise ? `${saved.name} updated.` : `${saved.name} added.`)
       await loadExercises(saved.id)
@@ -310,12 +335,36 @@ export function LiftsPage() {
     }
   }
 
+  function selectExercise(exerciseId: number) {
+    if (exerciseId === selectedId) return
+    liftRequest.current += 1
+    setLifts([])
+    setError('')
+    setSelectedId(exerciseId)
+  }
+
+  function exerciseSelectorButton(exercise: Exercise) {
+    return (
+      <button
+        type="button"
+        key={exercise.id}
+        className={`tracker-selector__exercise ${exercise.id === selectedId ? 'is-active' : ''}`}
+        aria-pressed={exercise.id === selectedId}
+        onClick={() => selectExercise(exercise.id)}
+      >
+        <span className="series-dot" style={{ backgroundColor: exercise.color }} />
+        <span><strong>{exercise.name}</strong><small>{exercise.category}</small></span>
+        <b>{exercise.personalBest == null ? '-' : `${exercise.personalBest} ${exercise.unit}`}</b>
+      </button>
+    )
+  }
+
   return (
     <div className="page-stack">
       <PageHeader
         eyebrow="STRENGTH PROGRESS"
         title="Max lifts"
-        description="Keep an honest record of your best sets and let the long-term strength curve do the talking."
+        description="Group and search the exercises you track, record your best sets, and let the long-term strength curve do the talking."
         actions={(
           <>
             {!editingOrder && (
@@ -349,10 +398,15 @@ export function LiftsPage() {
       ) : (
         <div className="tracker-layout">
           <aside className="tracker-selector panel">
-            <div className="tracker-selector__heading"><span>EXERCISES</span><small>{exercises.length}</small></div>
+            <div className="tracker-selector__heading">
+              <span>EXERCISES</span>
+              <small aria-label={`${visibleExercises.length} of ${exercises.length} exercises shown`}>
+                {visibleExercises.length === exercises.length ? exercises.length : `${visibleExercises.length}/${exercises.length}`}
+              </small>
+            </div>
             {editingOrder ? (
               <div className="tracker-reorder">
-                <p className="tracker-reorder__hint" id="exercise-order-hint">Drag exercises into place, or use the arrow buttons.</p>
+                <p className="tracker-reorder__hint" id="exercise-order-hint">Drag exercises into place, or use the arrow buttons. This saved order is used within each group and whenever Sort is set to Custom order.</p>
                 {orderError && <div className="tracker-reorder__feedback form-alert" role="alert">{orderError}</div>}
                 <div className="tracker-reorder__list" role="list" aria-label="Exercise order" aria-describedby="exercise-order-hint">
                   {orderDraft.map((exercise, index) => (
@@ -371,7 +425,7 @@ export function LiftsPage() {
                     >
                       <span className="tracker-reorder__grip" aria-hidden="true"><GripVertical size={18} /></span>
                       <span className="series-dot" style={{ backgroundColor: exercise.color }} />
-                      <span className="tracker-reorder__content"><strong>{exercise.name}</strong><small>Position {index + 1} of {orderDraft.length}</small></span>
+                      <span className="tracker-reorder__content"><strong>{exercise.name}</strong><small>{exercise.category} - Position {index + 1} of {orderDraft.length}</small></span>
                       <span className="tracker-reorder__controls">
                         <button
                           className="icon-button"
@@ -398,30 +452,77 @@ export function LiftsPage() {
               </div>
             ) : (
               <>
-                <div className="tracker-selector__list">
-                  {exercises.map((exercise) => (
-                    <button
-                      type="button"
-                      key={exercise.id}
-                      className={exercise.id === selectedId ? 'is-active' : ''}
-                      aria-pressed={exercise.id === selectedId}
-                      onClick={() => {
-                        if (exercise.id === selectedId) return
-                        liftRequest.current += 1
-                        setLifts([])
-                        setError('')
-                        setSelectedId(exercise.id)
-                      }}
-                    >
-                      <span className="series-dot" style={{ backgroundColor: exercise.color }} />
-                      <span><strong>{exercise.name}</strong><small>{exercise.category}</small></span>
-                      <b>{exercise.personalBest == null ? '-' : `${exercise.personalBest} ${exercise.unit}`}</b>
-                    </button>
-                  ))}
+                <div className="exercise-library-controls">
+                  <label className="exercise-library-search">
+                    <span>Search</span>
+                    <span className="exercise-library-search__input">
+                      <Search size={15} aria-hidden="true" />
+                      <input
+                        type="search"
+                        value={exerciseQuery}
+                        onChange={(event) => setExerciseQuery(event.target.value)}
+                        placeholder="Exercise or group"
+                        autoComplete="off"
+                      />
+                    </span>
+                  </label>
+                  <div className="exercise-library-controls__row">
+                    <label>
+                      <span>Group</span>
+                      <select value={groupFilter} onChange={(event) => setGroupFilter(event.target.value)}>
+                        <option value="all">All groups</option>
+                        {groupOptions.map((group) => (
+                          <option value={group.key} key={group.key}>{group.label} ({group.count})</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      <span>Sort</span>
+                      <select
+                        value={librarySort}
+                        onChange={(event) => setLibrarySort(event.target.value as ExerciseLibrarySort)}
+                      >
+                        <option value="group">Group A-Z</option>
+                        <option value="custom">Custom order</option>
+                        <option value="name">Name A-Z</option>
+                      </select>
+                    </label>
+                  </div>
+                </div>
+
+                <div className={`tracker-selector__list ${librarySort === 'group' ? 'tracker-selector__list--grouped' : ''}`}>
+                  {visibleExercises.length === 0 ? (
+                    <div className="tracker-selector__empty">
+                      <strong>No exercises found</strong>
+                      <small>Try another exercise name or group.</small>
+                      {filtersActive && (
+                        <button type="button" onClick={() => { setExerciseQuery(''); setGroupFilter('all') }}>
+                          Clear filters
+                        </button>
+                      )}
+                    </div>
+                  ) : librarySort === 'group' ? (
+                    visibleGroups.map((group, groupIndex) => (
+                      <section className="tracker-selector__group" aria-labelledby={`lift-group-${groupIndex}`} key={group.key}>
+                        <div className="tracker-selector__group-heading">
+                          <span id={`lift-group-${groupIndex}`}>{group.label}</span>
+                          <small>{group.exercises.length}</small>
+                        </div>
+                        <div className="tracker-selector__group-items">
+                          {group.exercises.map(exerciseSelectorButton)}
+                        </div>
+                      </section>
+                    ))
+                  ) : (
+                    visibleExercises.map(exerciseSelectorButton)
+                  )}
                 </div>
                 <Button variant="ghost" icon={<Plus size={16} />} onClick={openNewExercise}>Custom exercise</Button>
               </>
             )}
+            <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+              {`${visibleExercises.length} of ${exercises.length} exercises shown.`}
+            </span>
             <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">{orderAnnouncement}</span>
           </aside>
 
@@ -516,6 +617,7 @@ export function LiftsPage() {
         item={editingExercise}
         error={formError}
         busy={saving}
+        groups={groupOptions.map((group) => group.label)}
         onClose={() => {
           setExerciseModalOpen(false)
           pendingRecordAfterCreate.current = false
@@ -550,6 +652,7 @@ function ExerciseModal({
   item,
   error,
   busy,
+  groups,
   onClose,
   onSave,
 }: {
@@ -557,6 +660,7 @@ function ExerciseModal({
   item: Exercise | null
   error: string
   busy: boolean
+  groups: string[]
   onClose: () => void
   onSave: (input: { name: string; category: string; unit: string; color: string }) => Promise<void>
 }) {
@@ -590,13 +694,20 @@ function ExerciseModal({
         {error && <div className="form-alert" role="alert">{error}</div>}
         <label className="field"><span>Exercise name</span><input value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. Incline bench press" maxLength={100} required data-modal-autofocus /></label>
         <div className="form-grid">
-          <label className="field"><span>Category</span><input value={category} onChange={(event) => setCategory(event.target.value)} placeholder="Strength" maxLength={40} required /></label>
+          <label className="field">
+            <span>Group</span>
+            <input list="exercise-group-options" value={category} onChange={(event) => setCategory(event.target.value)} placeholder="e.g. Push, Pull, Legs" maxLength={40} required />
+            <small>Use an existing group or type a new one.</small>
+          </label>
           <label className="field">
             <span>Unit</span>
             <input value={unit} onChange={(event) => setUnit(event.target.value)} placeholder="kg" maxLength={16} required disabled={Boolean(item?.recordCount)} />
             {Boolean(item?.recordCount) && <small>Remove this exercise's lift history before changing its unit.</small>}
           </label>
         </div>
+        <datalist id="exercise-group-options">
+          {groups.map((group) => <option value={group} key={group} />)}
+        </datalist>
         <label className="field"><span>Chart colour</span><span className="color-input"><input type="color" value={color} onChange={(event) => setColor(event.target.value)} /><b>{color.toUpperCase()}</b></span></label>
         <div className="color-swatches" aria-label="Suggested colours">
           {CHART_COLORS.map((swatch) => <button type="button" key={swatch} className={color === swatch ? 'is-active' : ''} style={{ backgroundColor: swatch }} onClick={() => setColor(swatch)} aria-label={`Use colour ${swatch}`} aria-pressed={color === swatch} />)}

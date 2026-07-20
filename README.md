@@ -73,7 +73,7 @@ The repository ignores local dependencies, compiled output, environment files, S
 - Secure first-run administrator setup and sign-in with HTTP-only sessions
 - One-time account invitations: the administrator creates a username, shares the generated code, and the friend chooses their own password on first sign-in
 - Custom measurement types and dated measurement history, with saved drag-and-drop ordering
-- Custom exercises, max-lift history, estimated one-rep max values, and saved drag-and-drop ordering
+- Custom exercise groups, searchable and grouped max-lift lists, estimated one-rep max values, lift history, and saved drag-and-drop ordering
 - Responsive progress charts with date-range filtering
 - A per-user mobile bottom bar with four selectable, ordered shortcuts and a permanent More gateway
 - Editing, deletion, notes, and unit-aware records

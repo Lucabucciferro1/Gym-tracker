@@ -14,6 +14,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type
 import { ApiError, api, errorMessage } from '../api'
 import { Button, EmptyState, ErrorNotice, Modal, PageHeader } from '../components/ui'
 import { useToast } from '../context/ToastContext'
+import { exerciseGroupOptions } from '../exerciseLibrary'
 import {
   CHART_COLORS,
   type Exercise,
@@ -383,7 +384,7 @@ function WorkoutDayModal({
   const [localError, setLocalError] = useState('')
   const [createForKey, setCreateForKey] = useState<string | null>(null)
   const [newExerciseName, setNewExerciseName] = useState('')
-  const [newExerciseCategory, setNewExerciseCategory] = useState('Strength')
+  const [newExerciseGroup, setNewExerciseGroup] = useState('Strength')
   const [newExerciseUnit, setNewExerciseUnit] = useState('kg')
   const [newExerciseColor, setNewExerciseColor] = useState(CHART_COLORS[1])
   const [createError, setCreateError] = useState('')
@@ -421,7 +422,7 @@ function WorkoutDayModal({
     setCreateForKey(key)
     setLocalError('')
     setNewExerciseName('')
-    setNewExerciseCategory('Strength')
+    setNewExerciseGroup('Strength')
     setNewExerciseUnit('kg')
     setNewExerciseColor(CHART_COLORS[1])
     setCreateError('')
@@ -430,15 +431,15 @@ function WorkoutDayModal({
 
   async function createExercise(key: string) {
     setCreateError('')
-    if (!newExerciseName.trim() || !newExerciseCategory.trim() || !newExerciseUnit.trim()) {
-      setCreateError('Add a name, category, and unit for the new exercise.')
+    if (!newExerciseName.trim() || !newExerciseGroup.trim() || !newExerciseUnit.trim()) {
+      setCreateError('Add a name, group, and unit for the new exercise.')
       return
     }
     setCreatingExercise(true)
     try {
       const saved = await onCreateExercise({
         name: newExerciseName.trim(),
-        category: newExerciseCategory.trim(),
+        category: newExerciseGroup.trim(),
         unit: newExerciseUnit.trim(),
         color: newExerciseColor,
       })
@@ -494,6 +495,10 @@ function WorkoutDayModal({
   }
 
   const locked = busy || creatingExercise
+  const existingGroups = useMemo(
+    () => exerciseGroupOptions(exerciseCatalog).map((group) => group.label),
+    [exerciseCatalog],
+  )
 
   return (
     <Modal
@@ -574,7 +579,7 @@ function WorkoutDayModal({
                         </option>
                       )}
                       {exerciseCatalog.map((item) => (
-                        <option value={item.id} key={item.id}>{item.name} · {item.unit}</option>
+                        <option value={item.id} key={item.id}>{item.name} - {item.category} ({item.unit})</option>
                       ))}
                       <option value="create">＋ Create a new shared exercise...</option>
                     </select>
@@ -622,9 +627,15 @@ function WorkoutDayModal({
                         />
                       </label>
                       <div className="form-grid">
-                        <label className="field"><span>Category</span><input value={newExerciseCategory} onChange={(event) => setNewExerciseCategory(event.target.value)} placeholder="Strength" maxLength={40} disabled={creatingExercise} /></label>
+                        <label className="field">
+                          <span>Group</span>
+                          <input list="workout-exercise-group-options" value={newExerciseGroup} onChange={(event) => setNewExerciseGroup(event.target.value)} placeholder="e.g. Push, Pull, Legs" maxLength={40} disabled={creatingExercise} />
+                        </label>
                         <label className="field"><span>Unit</span><input value={newExerciseUnit} onChange={(event) => setNewExerciseUnit(event.target.value)} placeholder="kg" maxLength={16} disabled={creatingExercise} /></label>
                       </div>
+                      <datalist id="workout-exercise-group-options">
+                        {existingGroups.map((group) => <option value={group} key={group} />)}
+                      </datalist>
                       <label className="field">
                         <span>Chart colour</span>
                         <span className="color-input"><input type="color" value={newExerciseColor} onChange={(event) => setNewExerciseColor(event.target.value)} disabled={creatingExercise} /><b>{newExerciseColor.toUpperCase()}</b></span>

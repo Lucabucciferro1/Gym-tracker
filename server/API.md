@@ -102,6 +102,8 @@ workout-plan exercise names. Renaming an exercise therefore updates its name eve
 shown in the workout plan. Deleting an exercise used by one or more workout days returns
 `409 EXERCISE_IN_WORKOUT` with `{ dayOfWeeks }`; remove those occurrences first. If no workout
 occurrence uses it, deletion retains the existing behavior of deleting its lift records too.
+The client presents `category` as the user's exercise group and can search or sort the catalog by
+that value; the API field remains `category` for backward compatibility.
 
 The reorder body must contain every exercise ID owned by the signed-in user exactly once.
 Duplicates, missing IDs, extra IDs, and IDs owned by another user return
