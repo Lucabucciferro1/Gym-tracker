@@ -3,6 +3,7 @@ import {
   Beef,
   Calculator,
   Carrot,
+  Copy,
   Flame,
   Gauge,
   Info,
@@ -17,10 +18,12 @@ import {
   Wheat,
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { api, errorMessage } from '../api'
 import { calculateBmr, heightToCentimeters, normalizeWeightUnit, weightToKilograms, type BmrFormulaSex, type WeightUnit } from '../bmr'
 import { Button, ConfirmDialog, EmptyState, ErrorNotice, Modal, PageHeader } from '../components/ui'
 import { useToast } from '../context/ToastContext'
+import { parsePlanDay, planDayOfWeek } from '../navigationState'
 import type { BmrProfile, BmrProfileInput, BodyPart, Meal, MealPlan, MealPlanSettings, Measurement } from '../types'
 import { formatDate } from '../utils'
 import '../plans.css'
@@ -45,6 +48,7 @@ function formatAmount(value: number) {
 
 export function MealPlanPage() {
   const toast = useToast()
+  const [searchParams, setSearchParams] = useSearchParams()
   const bmrEditButtonRef = useRef<HTMLButtonElement>(null)
   const restoreBmrEditFocus = useRef(false)
   const [plan, setPlan] = useState<MealPlan | null>(null)
@@ -52,12 +56,13 @@ export function MealPlanPage() {
   const [bmrLoading, setBmrLoading] = useState(true)
   const [bmrError, setBmrError] = useState('')
   const [bmrEditorOpen, setBmrEditorOpen] = useState(false)
-  const [selectedDay, setSelectedDay] = useState(0)
+  const [selectedDay, setSelectedDay] = useState(() => parsePlanDay(searchParams.get('day')) ?? planDayOfWeek())
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [mealModalOpen, setMealModalOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [editingMeal, setEditingMeal] = useState<Meal | null>(null)
+  const [mealTemplate, setMealTemplate] = useState<Meal | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<Meal | null>(null)
   const [mealFormError, setMealFormError] = useState('')
   const [settingsError, setSettingsError] = useState('')
@@ -87,7 +92,7 @@ export function MealPlanPage() {
     try {
       const nextProfile = await api.mealPlan.getBmr()
       setBmrProfile(nextProfile)
-      setBmrEditorOpen(nextProfile == null)
+      setBmrEditorOpen(false)
     } catch (caught) {
       setBmrError(errorMessage(caught))
     } finally {
@@ -101,10 +106,31 @@ export function MealPlanPage() {
   }, [load, loadBmr])
 
   useEffect(() => {
-    if (!restoreBmrEditFocus.current || bmrEditorOpen || !bmrProfile) return
+    if (!restoreBmrEditFocus.current || bmrEditorOpen) return
     restoreBmrEditFocus.current = false
     bmrEditButtonRef.current?.focus()
   }, [bmrEditorOpen, bmrProfile])
+
+  useEffect(() => {
+    if (loading || searchParams.get('new') !== 'meal') return
+    const requestedDay = parsePlanDay(searchParams.get('day'))
+    if (requestedDay != null && plan?.days.some((day) => day.dayOfWeek === requestedDay)) {
+      setSelectedDay(requestedDay)
+    }
+    setEditingMeal(null)
+    setMealTemplate(null)
+    setMealFormError('')
+    setMealModalOpen(true)
+    const nextParams = new URLSearchParams(searchParams)
+    nextParams.delete('new')
+    setSearchParams(nextParams, { replace: true })
+  }, [loading, plan, searchParams, setSearchParams])
+
+  useEffect(() => {
+    if (loading || !window.matchMedia('(max-width: 760px)').matches) return
+    document.getElementById(`meal-day-tab-${selectedDay}`)
+      ?.scrollIntoView({ block: 'nearest', inline: 'center' })
+  }, [loading])
 
   const activeDay = plan?.days.find((day) => day.dayOfWeek === selectedDay) ?? null
   const settings = plan?.settings ?? null
@@ -139,12 +165,21 @@ export function MealPlanPage() {
 
   function openNewMeal() {
     setEditingMeal(null)
+    setMealTemplate(null)
     setMealFormError('')
     setMealModalOpen(true)
   }
 
   function openEditMeal(meal: Meal) {
     setEditingMeal(meal)
+    setMealTemplate(null)
+    setMealFormError('')
+    setMealModalOpen(true)
+  }
+
+  function openDuplicateMeal(meal: Meal) {
+    setEditingMeal(null)
+    setMealTemplate(meal)
     setMealFormError('')
     setMealModalOpen(true)
   }
@@ -156,8 +191,11 @@ export function MealPlanPage() {
       if (editingMeal) await api.mealPlan.updateMeal(editingMeal.id, input)
       else await api.mealPlan.createMeal(input)
       setMealModalOpen(false)
+      setEditingMeal(null)
+      setMealTemplate(null)
       toast(editingMeal ? `${input.name} updated.` : `${input.name} added to ${dayLabel(input.dayOfWeek)}.`)
       await load(false)
+      setSelectedDay(input.dayOfWeek)
     } catch (caught) {
       setMealFormError(errorMessage(caught))
     } finally {
@@ -235,8 +273,16 @@ export function MealPlanPage() {
           <span className="plan-summary__bmr-stat">
             <strong>{bmrLoading ? '-' : bmrProfile ? bmrProfile.estimatedBmr.toLocaleString() : '-'}</strong>
             <small>BMR kcal/day</small>
-            {bmrProfile && !bmrEditorOpen && (
-              <button ref={bmrEditButtonRef} type="button" className="plan-summary__stat-action" onClick={() => setBmrEditorOpen(true)} aria-label="Edit saved BMR"><Pencil size={11} /> Edit</button>
+            {!bmrLoading && !bmrEditorOpen && (
+              <button
+                ref={bmrEditButtonRef}
+                type="button"
+                className="plan-summary__stat-action"
+                onClick={() => setBmrEditorOpen(true)}
+                aria-label={bmrProfile ? 'Edit saved BMR' : 'Calculate and save BMR'}
+              >
+                {bmrProfile ? <Pencil size={11} /> : <Calculator size={11} />} {bmrProfile ? 'Edit' : 'Calculate'}
+              </button>
             )}
           </span>
         </div>
@@ -336,6 +382,7 @@ export function MealPlanPage() {
                       </div>
                     )}
                     <div className="meal-card__actions">
+                      <button type="button" className="icon-button" onClick={() => openDuplicateMeal(meal)} aria-label={`Duplicate ${meal.name}`}><Copy size={16} /></button>
                       <button type="button" className="icon-button" onClick={() => openEditMeal(meal)} aria-label={`Edit ${meal.name}`}><Pencil size={16} /></button>
                       <button type="button" className="icon-button icon-button--danger" onClick={() => setDeleteTarget(meal)} aria-label={`Delete ${meal.name}`}><Trash2 size={16} /></button>
                     </div>
@@ -360,12 +407,21 @@ export function MealPlanPage() {
       <MealModal
         open={mealModalOpen}
         item={editingMeal}
+        template={mealTemplate}
         dayOfWeek={selectedDay}
-        nextSortOrder={activeDay ? Math.max(-1, ...activeDay.meals.map((meal) => meal.sortOrder)) + 1 : 0}
+        nextSortOrderForDay={(dayOfWeek) => {
+          const targetDay = plan?.days.find((day) => day.dayOfWeek === dayOfWeek)
+          return targetDay ? Math.max(-1, ...targetDay.meals.map((meal) => meal.sortOrder)) + 1 : 0
+        }}
         settings={settings}
         error={mealFormError}
         busy={savingMeal}
-        onClose={() => { if (!savingMeal) setMealModalOpen(false) }}
+        onClose={() => {
+          if (!savingMeal) {
+            setMealModalOpen(false)
+            setMealTemplate(null)
+          }
+        }}
         onSave={saveMeal}
       />
       <MealSettingsModal
@@ -436,7 +492,7 @@ function BmrCalculator({
     window.requestAnimationFrame(() => firstFieldRef.current?.focus())
   }, [editing, profile])
 
-  const formOpen = !profile || editing
+  const formOpen = editing
 
   useEffect(() => {
     if (loading || error || !formOpen) return
@@ -636,7 +692,7 @@ function BmrCalculator({
     }
   }
 
-  if (profile && !editing && !loading && !error) return null
+  if (!editing && !loading && !error) return null
 
   return (
     <section className="panel bmr-calculator" aria-labelledby="bmr-calculator-title">
@@ -735,7 +791,7 @@ function BmrCalculator({
 
           {saveError && <div className="form-alert bmr-calculator__error" role="alert">{saveError}</div>}
           <div className="bmr-calculator__actions">
-            {profile && <Button type="button" variant="secondary" disabled={saving} onClick={onCancel}>Cancel</Button>}
+            <Button type="button" variant="secondary" disabled={saving} onClick={onCancel}>Cancel</Button>
             <Button type="submit" busy={saving} disabled={estimate == null || (weightSourceMode === 'tracker' && !selectedMeasurement)}>{profile ? 'Save changes' : 'Save BMR'}</Button>
           </div>
           <p className="bmr-calculator__note"><Info size={15} />Calculated with the Mifflin–St Jeor equation. This is an estimate of resting energy use, not your total daily calorie requirement.</p>
@@ -797,8 +853,9 @@ function NutritionMetric({
 function MealModal({
   open,
   item,
+  template,
   dayOfWeek,
-  nextSortOrder,
+  nextSortOrderForDay,
   settings,
   error,
   busy,
@@ -807,8 +864,9 @@ function MealModal({
 }: {
   open: boolean
   item: Meal | null
+  template: Meal | null
   dayOfWeek: number
-  nextSortOrder: number
+  nextSortOrderForDay: (dayOfWeek: number) => number
   settings: MealPlanSettings | null
   error: string
   busy: boolean
@@ -825,14 +883,15 @@ function MealModal({
 
   useEffect(() => {
     if (!open) return
-    setName(item?.name ?? '')
+    const source = item ?? template
+    setName(source?.name ?? '')
     setTargetDay(item?.dayOfWeek ?? dayOfWeek)
-    setDescription(item?.description ?? '')
-    setCalories(item?.calories == null ? '' : String(item.calories))
-    setProtein(item?.protein == null ? '' : String(item.protein))
-    setCarbs(item?.carbs == null ? '' : String(item.carbs))
-    setFat(item?.fat == null ? '' : String(item.fat))
-  }, [dayOfWeek, item, open])
+    setDescription(source?.description ?? '')
+    setCalories(source?.calories == null ? '' : String(source.calories))
+    setProtein(source?.protein == null ? '' : String(source.protein))
+    setCarbs(source?.carbs == null ? '' : String(source.carbs))
+    setFat(source?.fat == null ? '' : String(source.fat))
+  }, [dayOfWeek, item, open, template])
 
   function optionalNumber(value: string) {
     return value === '' ? null : Number(value)
@@ -841,15 +900,18 @@ function MealModal({
   function submit(event: FormEvent) {
     event.preventDefault()
     if (!settings) return
+    const source = item ?? template
     void onSave({
       dayOfWeek: targetDay,
       name: name.trim(),
       description: description.trim() || null,
-      calories: settings.showCalories ? optionalNumber(calories) : item?.calories ?? null,
-      protein: settings.showMacros ? optionalNumber(protein) : item?.protein ?? null,
-      carbs: settings.showMacros ? optionalNumber(carbs) : item?.carbs ?? null,
-      fat: settings.showMacros ? optionalNumber(fat) : item?.fat ?? null,
-      sortOrder: item?.sortOrder ?? nextSortOrder,
+      calories: settings.showCalories ? optionalNumber(calories) : source?.calories ?? null,
+      protein: settings.showMacros ? optionalNumber(protein) : source?.protein ?? null,
+      carbs: settings.showMacros ? optionalNumber(carbs) : source?.carbs ?? null,
+      fat: settings.showMacros ? optionalNumber(fat) : source?.fat ?? null,
+      sortOrder: item && item.dayOfWeek === targetDay
+        ? item.sortOrder
+        : nextSortOrderForDay(targetDay),
     })
   }
 
@@ -858,11 +920,11 @@ function MealModal({
       open={open}
       onClose={onClose}
       eyebrow={dayLabel(targetDay).toUpperCase()}
-      title={item ? 'Edit meal' : 'Add a meal'}
+      title={item ? 'Edit meal' : template ? 'Duplicate meal' : 'Add a meal'}
       footer={(
         <>
           <Button type="button" variant="secondary" disabled={busy} onClick={onClose}>Cancel</Button>
-          <Button type="submit" form="meal-plan-form" busy={busy}>{item ? 'Save changes' : 'Add meal'}</Button>
+          <Button type="submit" form="meal-plan-form" busy={busy}>{item ? 'Save changes' : template ? 'Add copy' : 'Add meal'}</Button>
         </>
       )}
     >

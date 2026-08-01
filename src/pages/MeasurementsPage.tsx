@@ -28,8 +28,16 @@ import {
   RangeSelector,
 } from '../components/ui'
 import { useToast } from '../context/ToastContext'
+import { parsePositiveInteger } from '../navigationState'
 import { CHART_COLORS, type BodyPart, type DateRange, type Measurement } from '../types'
-import { dateInput, filterByRange, formatDate, percentChange, toIsoDate, todayInput } from '../utils'
+import {
+  dateInput,
+  filterByRange,
+  formatDate,
+  percentChange,
+  toIsoDate,
+  todayInput,
+} from '../utils'
 
 type DeleteTarget =
   | { kind: 'part'; item: BodyPart }
@@ -41,6 +49,7 @@ export function MeasurementsPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const [parts, setParts] = useState<BodyPart[]>([])
   const [selectedId, setSelectedId] = useState<number | null>(null)
+  const [recordPartId, setRecordPartId] = useState<number | null>(null)
   const [records, setRecords] = useState<Measurement[]>([])
   const [range, setRange] = useState<DateRange>('90d')
   const [loadingParts, setLoadingParts] = useState(true)
@@ -64,6 +73,7 @@ export function MeasurementsPage() {
   const pendingRecordAfterCreate = useRef(false)
 
   const selectedPart = parts.find((part) => part.id === selectedId) ?? null
+  const recordPart = parts.find((part) => part.id === recordPartId) ?? selectedPart
 
   const loadParts = useCallback(async (preferredId?: number) => {
     setLoadingParts(true)
@@ -111,18 +121,40 @@ export function MeasurementsPage() {
   }, [loadRecords, selectedId])
 
   useEffect(() => {
-    if (loadingParts || searchParams.get('new') !== 'record') return
+    if (loadingParts) return
+    const requestedValue = searchParams.get('part')
+    const requestedId = parsePositiveInteger(requestedValue)
+    const requestedPart = requestedId == null
+      ? null
+      : parts.find((part) => part.id === requestedId) ?? null
+    const wantsRecord = searchParams.get('new') === 'record'
+
+    if (requestedValue != null && !requestedPart) {
+      const nextParams = new URLSearchParams(searchParams)
+      nextParams.delete('part')
+      nextParams.delete('new')
+      setSearchParams(nextParams, { replace: true })
+      toast('That body part is no longer available.', 'error')
+      return
+    }
+
+    if (requestedPart && selectedId !== requestedPart.id) setSelectedId(requestedPart.id)
+    if (!wantsRecord) return
+
     if (parts.length) {
       pendingRecordAfterCreate.current = false
       setEditingRecord(null)
+      setRecordPartId(requestedPart?.id ?? selectedId ?? parts[0].id)
       setRecordModalOpen(true)
     } else {
       pendingRecordAfterCreate.current = true
       setEditingPart(null)
       setPartModalOpen(true)
     }
-    setSearchParams({}, { replace: true })
-  }, [loadingParts, parts.length, searchParams, setSearchParams])
+    const nextParams = new URLSearchParams(searchParams)
+    nextParams.delete('new')
+    setSearchParams(nextParams, { replace: true })
+  }, [loadingParts, parts, searchParams, selectedId, setSearchParams, toast])
 
   const filteredRecords = useMemo(() => filterByRange(records, range), [range, records])
   const latest = records.at(-1)
@@ -145,10 +177,12 @@ export function MeasurementsPage() {
 
   function openNewRecord() {
     if (!selectedPart) {
+      pendingRecordAfterCreate.current = true
       openNewPart()
       return
     }
     setEditingRecord(null)
+    setRecordPartId(selectedPart.id)
     setFormError('')
     setRecordModalOpen(true)
   }
@@ -166,6 +200,7 @@ export function MeasurementsPage() {
       if (!editingPart && pendingRecordAfterCreate.current) {
         pendingRecordAfterCreate.current = false
         setEditingRecord(null)
+        setRecordPartId(saved.id)
         setRecordModalOpen(true)
       }
     } catch (caught) {
@@ -176,18 +211,21 @@ export function MeasurementsPage() {
   }
 
   async function saveRecord(input: { value: number; recordedAt: string; note?: string | null }) {
-    if (!selectedPart) return
+    const targetPartId = editingRecord ? selectedPart?.id : recordPart?.id
+    if (!targetPartId) return
     setSaving(true)
     setFormError('')
     try {
       if (editingRecord) {
-        await api.bodyParts.measurements.update(selectedPart.id, editingRecord.id, input)
+        await api.bodyParts.measurements.update(targetPartId, editingRecord.id, input)
       } else {
-        await api.bodyParts.measurements.create(selectedPart.id, input)
+        await api.bodyParts.measurements.create(targetPartId, input)
       }
       setRecordModalOpen(false)
       toast(editingRecord ? 'Measurement updated.' : 'Measurement logged.')
-      await Promise.all([loadRecords(selectedPart.id), loadParts(selectedPart.id)])
+      await loadParts(targetPartId)
+      if (selectedId === targetPartId) await loadRecords(targetPartId)
+      else setSelectedId(targetPartId)
     } catch (caught) {
       setFormError(errorMessage(caught))
     } finally {
@@ -401,7 +439,7 @@ export function MeasurementsPage() {
                     <button
                       type="button"
                       key={part.id}
-                      className={part.id === selectedId ? 'is-active' : ''}
+                      className={`tracker-selector__exercise ${part.id === selectedId ? 'is-active' : ''}`}
                       aria-pressed={part.id === selectedId}
                       onClick={() => {
                         if (part.id === selectedId) return
@@ -515,10 +553,15 @@ export function MeasurementsPage() {
       <MeasurementModal
         open={recordModalOpen}
         item={editingRecord}
-        part={selectedPart}
+        part={editingRecord ? selectedPart : recordPart}
+        parts={parts}
         error={formError}
         busy={saving}
-        onClose={() => setRecordModalOpen(false)}
+        onClose={() => {
+          setRecordModalOpen(false)
+          setRecordPartId(null)
+        }}
+        onPartChange={setRecordPartId}
         onSave={saveRecord}
       />
       <ConfirmDialog
@@ -597,28 +640,34 @@ function MeasurementModal({
   open,
   item,
   part,
+  parts,
   error,
   busy,
   onClose,
+  onPartChange,
   onSave,
 }: {
   open: boolean
   item: Measurement | null
   part: BodyPart | null
+  parts: BodyPart[]
   error: string
   busy: boolean
   onClose: () => void
+  onPartChange: (bodyPartId: number) => void
   onSave: (input: { value: number; recordedAt: string; note?: string | null }) => Promise<void>
 }) {
   const [value, setValue] = useState('')
   const [recordedAt, setRecordedAt] = useState(todayInput())
   const [note, setNote] = useState('')
+  const [detailsOpen, setDetailsOpen] = useState(false)
 
   useEffect(() => {
     if (!open) return
     setValue(item ? String(item.value) : '')
     setRecordedAt(item ? dateInput(item.recordedAt) : todayInput())
     setNote(item?.note ?? '')
+    setDetailsOpen(Boolean(item))
   }, [item, open])
 
   function submit(event: FormEvent) {
@@ -636,11 +685,35 @@ function MeasurementModal({
     >
       <form id="measurement-form" className="form-stack" onSubmit={submit}>
         {error && <div className="form-alert" role="alert">{error}</div>}
-        <div className="form-grid">
-          <label className="field"><span>Value ({part?.unit})</span><input type="number" min="0.01" step="any" value={value} onChange={(event) => setValue(event.target.value)} placeholder="0.0" required data-modal-autofocus /></label>
-          <label className="field"><span>Date</span><input type="date" value={recordedAt} max={todayInput()} onChange={(event) => setRecordedAt(event.target.value)} required /></label>
-        </div>
-        <label className="field"><span>Note <small>Optional</small></span><textarea value={note} onChange={(event) => setNote(event.target.value)} placeholder="How you measured, time of day, or anything useful..." maxLength={500} rows={4} /></label>
+        {!item && (
+          <label className="field">
+            <span>Body part</span>
+            <select
+              value={part?.id ?? ''}
+              onChange={(event) => {
+                setValue('')
+                onPartChange(Number(event.target.value))
+              }}
+              required
+            >
+              {parts.map((candidate) => (
+                <option value={candidate.id} key={candidate.id}>{candidate.name} ({candidate.unit})</option>
+              ))}
+            </select>
+          </label>
+        )}
+        <label className="field"><span>Value ({part?.unit})</span><input type="number" inputMode="decimal" min="0.01" step="any" value={value} onChange={(event) => setValue(event.target.value)} placeholder="0.0" required data-modal-autofocus /></label>
+        <details
+          className="form-disclosure"
+          open={detailsOpen}
+          onToggle={(event) => setDetailsOpen(event.currentTarget.open)}
+        >
+          <summary>Date or note <small>{recordedAt === todayInput() && !note.trim() ? 'Optional' : 'Added'}</small></summary>
+          <div className="form-disclosure__content">
+            <label className="field"><span>Date</span><input type="date" value={recordedAt} max={todayInput()} onChange={(event) => setRecordedAt(event.target.value)} required /></label>
+            <label className="field"><span>Note <small>Optional</small></span><textarea value={note} onChange={(event) => setNote(event.target.value)} placeholder="How you measured, time of day, or anything useful..." maxLength={500} rows={3} /></label>
+          </div>
+        </details>
       </form>
     </Modal>
   )

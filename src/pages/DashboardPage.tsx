@@ -34,6 +34,20 @@ function timeGreeting() {
   return 'Good evening'
 }
 
+function measurementPath(bodyPartId?: number, newRecord = false) {
+  const params = new URLSearchParams()
+  if (bodyPartId) params.set('part', String(bodyPartId))
+  if (newRecord) params.set('new', 'record')
+  return `/measurements${params.size ? `?${params}` : ''}`
+}
+
+function liftPath(exerciseId?: number, newRecord = false) {
+  const params = new URLSearchParams()
+  if (exerciseId) params.set('exercise', String(exerciseId))
+  if (newRecord) params.set('new', 'record')
+  return `/lifts${params.size ? `?${params}` : ''}`
+}
+
 export function DashboardPage() {
   const { user } = useAuth()
   const navigate = useNavigate()
@@ -103,6 +117,7 @@ export function DashboardPage() {
         value: `${record.value} ${part.unit}`,
         recordedAt: record.recordedAt,
         color: part.color,
+        targetId: part.id,
       })),
     )
     const lifts = liftSeries.flatMap(({ exercise, records }) =>
@@ -113,6 +128,7 @@ export function DashboardPage() {
         value: `${record.weight} ${exercise.unit} x ${record.reps}`,
         recordedAt: record.recordedAt,
         color: exercise.color,
+        targetId: exercise.id,
       })),
     )
     return [...measurements, ...lifts]
@@ -128,8 +144,8 @@ export function DashboardPage() {
         description="A clear look at the work you have put in and where you are heading next."
         actions={(
           <div className="quick-actions">
-            <Button variant="secondary" icon={<Ruler size={17} />} onClick={() => navigate('/measurements?new=record')}>Log measurement</Button>
-            <Button icon={<Dumbbell size={17} />} onClick={() => navigate('/lifts?new=record')}>Log max lift</Button>
+            <Button variant="secondary" icon={<Ruler size={17} />} onClick={() => navigate(measurementPath(featuredMeasurement?.part.id, true))}>Log measurement</Button>
+            <Button icon={<Dumbbell size={17} />} onClick={() => navigate(liftPath(featuredLift?.exercise.id, true))}>Log max lift</Button>
           </div>
         )}
       />
@@ -157,7 +173,7 @@ export function DashboardPage() {
         <article className="panel panel--chart">
           <header className="panel__header">
             <div><span className="eyebrow">BODY PROGRESS</span><h2>{featuredMeasurement?.part.name ?? 'Measurements'}</h2></div>
-            <button className="text-link" type="button" onClick={() => navigate('/measurements')}>View all <ArrowRight size={15} /></button>
+            <button className="text-link" type="button" onClick={() => navigate(measurementPath(featuredMeasurement?.part.id))}>View all <ArrowRight size={15} /></button>
           </header>
           {featuredMeasurement ? (
             <ProgressChart
@@ -171,7 +187,7 @@ export function DashboardPage() {
               icon={<Ruler size={22} />}
               title="No measurements yet"
               description="Record a baseline now and Forge will reveal the trend over time."
-              action={<Button variant="secondary" icon={<Plus size={16} />} onClick={() => navigate('/measurements?new=record')}>Add baseline</Button>}
+              action={<Button variant="secondary" icon={<Plus size={16} />} onClick={() => navigate(measurementPath(undefined, true))}>Add baseline</Button>}
             />
           )}
         </article>
@@ -179,7 +195,7 @@ export function DashboardPage() {
         <article className="panel panel--chart">
           <header className="panel__header">
             <div><span className="eyebrow">STRENGTH PROGRESS</span><h2>{featuredLift?.exercise.name ?? 'Max lifts'}</h2></div>
-            <button className="text-link" type="button" onClick={() => navigate('/lifts')}>View all <ArrowRight size={15} /></button>
+            <button className="text-link" type="button" onClick={() => navigate(liftPath(featuredLift?.exercise.id))}>View all <ArrowRight size={15} /></button>
           </header>
           {featuredLift ? (
             <ProgressChart
@@ -193,7 +209,7 @@ export function DashboardPage() {
               icon={<Dumbbell size={22} />}
               title="No max lifts yet"
               description="Log your current best so every future gain has a starting point."
-              action={<Button variant="secondary" icon={<Plus size={16} />} onClick={() => navigate('/lifts?new=record')}>Log a max lift</Button>}
+              action={<Button variant="secondary" icon={<Plus size={16} />} onClick={() => navigate(liftPath(undefined, true))}>Log a max lift</Button>}
             />
           )}
         </article>
@@ -211,7 +227,9 @@ export function DashboardPage() {
                   type="button"
                   key={item.id}
                   className="activity-row"
-                  onClick={() => navigate(item.type === 'lift' ? '/lifts' : '/measurements')}
+                  onClick={() => navigate(item.type === 'lift'
+                    ? liftPath(item.targetId)
+                    : measurementPath(item.targetId))}
                 >
                   <span className="activity-row__icon" style={{ '--item-color': item.color } as React.CSSProperties}>
                     {item.type === 'lift' ? <Dumbbell size={17} /> : <Ruler size={17} />}

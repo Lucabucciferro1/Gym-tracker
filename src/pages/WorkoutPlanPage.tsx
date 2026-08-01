@@ -11,10 +11,12 @@ import {
   X,
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from 'react'
+import { Link, useSearchParams } from 'react-router-dom'
 import { ApiError, api, errorMessage } from '../api'
 import { Button, EmptyState, ErrorNotice, Modal, PageHeader } from '../components/ui'
 import { useToast } from '../context/ToastContext'
 import { exerciseGroupOptions } from '../exerciseLibrary'
+import { parsePlanDay, planDayOfWeek } from '../navigationState'
 import {
   CHART_COLORS,
   type Exercise,
@@ -68,14 +70,16 @@ function dayLabel(dayOfWeek: number) {
 
 export function WorkoutPlanPage() {
   const toast = useToast()
+  const [searchParams, setSearchParams] = useSearchParams()
   const [days, setDays] = useState<WorkoutDay[]>([])
-  const [selectedDay, setSelectedDay] = useState(0)
+  const [selectedDay, setSelectedDay] = useState(() => parsePlanDay(searchParams.get('day')) ?? planDayOfWeek())
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [exerciseCatalog, setExerciseCatalog] = useState<Exercise[]>([])
   const [catalogLoading, setCatalogLoading] = useState(true)
   const [catalogError, setCatalogError] = useState('')
   const [editorOpen, setEditorOpen] = useState(false)
+  const [editorStartsAsTraining, setEditorStartsAsTraining] = useState(false)
   const [saving, setSaving] = useState(false)
   const [formError, setFormError] = useState('')
 
@@ -117,6 +121,26 @@ export function WorkoutPlanPage() {
     void loadCatalog()
   }, [load, loadCatalog])
 
+  useEffect(() => {
+    if (loading || searchParams.get('edit') !== 'day') return
+    const requestedDay = parsePlanDay(searchParams.get('day'))
+    if (requestedDay != null && days.some((day) => day.dayOfWeek === requestedDay)) {
+      setSelectedDay(requestedDay)
+    }
+    setFormError('')
+    setEditorStartsAsTraining(false)
+    setEditorOpen(true)
+    const nextParams = new URLSearchParams(searchParams)
+    nextParams.delete('edit')
+    setSearchParams(nextParams, { replace: true })
+  }, [days, loading, searchParams, setSearchParams])
+
+  useEffect(() => {
+    if (loading || !window.matchMedia('(max-width: 760px)').matches) return
+    document.getElementById(`workout-day-tab-${selectedDay}`)
+      ?.scrollIntoView({ block: 'nearest', inline: 'center' })
+  }, [loading])
+
   const activeDay = days.find((day) => day.dayOfWeek === selectedDay) ?? null
   const trainingDays = days.filter((day) => !day.isRest).length
   const totalExercises = days.reduce((total, day) => total + day.exercises.length, 0)
@@ -137,6 +161,12 @@ export function WorkoutPlanPage() {
     }
   }
 
+  function openEditor(startAsTraining = false) {
+    setFormError('')
+    setEditorStartsAsTraining(startAsTraining)
+    setEditorOpen(true)
+  }
+
   function handleDayKeyDown(event: KeyboardEvent<HTMLButtonElement>, index: number) {
     let nextIndex: number | null = null
     if (event.key === 'ArrowRight' || event.key === 'ArrowDown') nextIndex = (index + 1) % DAYS.length
@@ -155,6 +185,7 @@ export function WorkoutPlanPage() {
     try {
       await api.workoutPlan.updateDay(activeDay.dayOfWeek, input)
       setEditorOpen(false)
+      setEditorStartsAsTraining(false)
       toast(`${dayLabel(activeDay.dayOfWeek)} plan updated.`)
       await load(false)
     } catch (caught) {
@@ -206,7 +237,7 @@ export function WorkoutPlanPage() {
           <Button
             icon={<Pencil size={17} />}
             disabled={!activeDay || loading}
-            onClick={() => { setFormError(''); setEditorOpen(true) }}
+            onClick={() => openEditor()}
           >
             Edit {activeDay ? dayLabel(activeDay.dayOfWeek) : 'day'}
           </Button>
@@ -279,13 +310,14 @@ export function WorkoutPlanPage() {
                 <h2>{activeDay.name}</h2>
                 <p>{activeDay.notes || (activeDay.isRest ? 'Give your body space to rebuild.' : 'No session notes yet.')}</p>
               </div>
-              <Button variant="secondary" icon={<Pencil size={16} />} onClick={() => { setFormError(''); setEditorOpen(true) }}>Edit day</Button>
+              <Button variant="secondary" icon={<Pencil size={16} />} onClick={() => openEditor()}>Edit day</Button>
             </header>
 
             {activeDay.isRest ? (
               <div className="rest-day-state">
                 <span><BedDouble size={30} /></span>
                 <div><h3>Rest is productive.</h3><p>Recovery is where training turns into progress. Sleep well, eat well, and come back ready.</p></div>
+                <Button variant="secondary" icon={<Plus size={16} />} onClick={() => openEditor(true)}>Plan a workout</Button>
                 <Sparkles size={22} aria-hidden="true" />
               </div>
             ) : activeDay.exercises.length ? (
@@ -297,8 +329,19 @@ export function WorkoutPlanPage() {
                       <h3>{exercise.name}</h3>
                       {exercise.notes && <p>{exercise.notes}</p>}
                     </div>
-                    <div className="workout-exercise-card__prescription" aria-label={`${exercise.sets} sets of ${exercise.reps} repetitions`}>
-                      <strong>{exercise.sets}</strong><small>SETS</small><i aria-hidden="true">x</i><strong>{exercise.reps}</strong><small>REPS</small>
+                    <div className="workout-exercise-card__actions">
+                      <div className="workout-exercise-card__prescription" aria-label={`${exercise.sets} sets of ${exercise.reps} repetitions`}>
+                        <strong>{exercise.sets}</strong><small>SETS</small><i aria-hidden="true">x</i><strong>{exercise.reps}</strong><small>REPS</small>
+                      </div>
+                      {exercise.exerciseId != null && (
+                        <Link
+                          className="workout-exercise-card__log"
+                          to={`/lifts?exercise=${exercise.exerciseId}&new=record`}
+                          aria-label={`Log ${exercise.name}`}
+                        >
+                          <Plus size={15} /> Log lift
+                        </Link>
+                      )}
                     </div>
                   </li>
                 ))}
@@ -309,7 +352,7 @@ export function WorkoutPlanPage() {
                 icon={<Dumbbell size={23} />}
                 title="No exercises planned"
                 description="Add the movements, sets, and reps that will make this session count."
-                action={<Button variant="secondary" icon={<Plus size={16} />} onClick={() => setEditorOpen(true)}>Build this session</Button>}
+                action={<Button variant="secondary" icon={<Plus size={16} />} onClick={() => openEditor()}>Build this session</Button>}
               />
             )}
           </>
@@ -321,12 +364,18 @@ export function WorkoutPlanPage() {
       <WorkoutDayModal
         open={editorOpen}
         day={activeDay}
+        startAsTraining={editorStartsAsTraining}
         busy={saving}
         error={formError}
         exerciseCatalog={exerciseCatalog}
         catalogLoading={catalogLoading}
         catalogError={catalogError}
-        onClose={() => { if (!saving) setEditorOpen(false) }}
+        onClose={() => {
+          if (!saving) {
+            setEditorOpen(false)
+            setEditorStartsAsTraining(false)
+          }
+        }}
         onSave={saveDay}
         onCreateExercise={createSharedExercise}
         onRetryCatalog={() => void loadCatalog()}
@@ -350,6 +399,7 @@ function PlanLoading() {
 function WorkoutDayModal({
   open,
   day,
+  startAsTraining,
   busy,
   error,
   exerciseCatalog,
@@ -362,6 +412,7 @@ function WorkoutDayModal({
 }: {
   open: boolean
   day: WorkoutDay | null
+  startAsTraining: boolean
   busy: boolean
   error: string
   exerciseCatalog: Exercise[]
@@ -394,8 +445,10 @@ function WorkoutDayModal({
 
   useEffect(() => {
     if (!open || !day) return
-    setName(day.name)
-    setIsRest(day.isRest)
+    setName(startAsTraining && day.name.trim().toLocaleLowerCase() === 'rest day'
+      ? `${dayLabel(day.dayOfWeek)} workout`
+      : day.name)
+    setIsRest(startAsTraining ? false : day.isRest)
     setNotes(day.notes ?? '')
     setExercises(day.exercises.length ? day.exercises.map(toDraft) : [blankExercise()])
     setLocalError('')
@@ -403,7 +456,7 @@ function WorkoutDayModal({
     setCreateError('')
     setCreatingExercise(false)
     setAnnouncement('')
-  }, [day, open])
+  }, [day, open, startAsTraining])
 
   function updateExercise<K extends keyof Omit<ExerciseDraft, 'key'>>(
     key: string,

@@ -35,6 +35,7 @@ import {
   organizeExerciseLibrary,
   type ExerciseLibrarySort,
 } from '../exerciseLibrary'
+import { parsePositiveInteger } from '../navigationState'
 import { CHART_COLORS, type DateRange, type Exercise, type Lift } from '../types'
 import {
   dateInput,
@@ -56,6 +57,7 @@ export function LiftsPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const [exercises, setExercises] = useState<Exercise[]>([])
   const [selectedId, setSelectedId] = useState<number | null>(null)
+  const [liftExerciseId, setLiftExerciseId] = useState<number | null>(null)
   const [lifts, setLifts] = useState<Lift[]>([])
   const [range, setRange] = useState<DateRange>('90d')
   const [loadingExercises, setLoadingExercises] = useState(true)
@@ -82,6 +84,7 @@ export function LiftsPage() {
   const pendingRecordAfterCreate = useRef(false)
 
   const selectedExercise = exercises.find((exercise) => exercise.id === selectedId) ?? null
+  const liftExercise = exercises.find((exercise) => exercise.id === liftExerciseId) ?? selectedExercise
 
   const loadExercises = useCallback(async (preferredId?: number) => {
     setLoadingExercises(true)
@@ -129,18 +132,40 @@ export function LiftsPage() {
   }, [loadLifts, selectedId])
 
   useEffect(() => {
-    if (loadingExercises || searchParams.get('new') !== 'record') return
+    if (loadingExercises) return
+    const requestedValue = searchParams.get('exercise')
+    const requestedId = parsePositiveInteger(requestedValue)
+    const requestedExercise = requestedId == null
+      ? null
+      : exercises.find((exercise) => exercise.id === requestedId) ?? null
+    const wantsRecord = searchParams.get('new') === 'record'
+
+    if (requestedValue != null && !requestedExercise) {
+      const nextParams = new URLSearchParams(searchParams)
+      nextParams.delete('exercise')
+      nextParams.delete('new')
+      setSearchParams(nextParams, { replace: true })
+      toast('That exercise is no longer available.', 'error')
+      return
+    }
+
+    if (requestedExercise && selectedId !== requestedExercise.id) setSelectedId(requestedExercise.id)
+    if (!wantsRecord) return
+
     if (exercises.length) {
       pendingRecordAfterCreate.current = false
       setEditingLift(null)
+      setLiftExerciseId(requestedExercise?.id ?? selectedId ?? exercises[0].id)
       setLiftModalOpen(true)
     } else {
       pendingRecordAfterCreate.current = true
       setEditingExercise(null)
       setExerciseModalOpen(true)
     }
-    setSearchParams({}, { replace: true })
-  }, [exercises.length, loadingExercises, searchParams, setSearchParams])
+    const nextParams = new URLSearchParams(searchParams)
+    nextParams.delete('new')
+    setSearchParams(nextParams, { replace: true })
+  }, [exercises, loadingExercises, searchParams, selectedId, setSearchParams, toast])
 
   const filteredLifts = useMemo(() => filterByRange(lifts, range), [lifts, range])
   const groupOptions = useMemo(() => exerciseGroupOptions(exercises), [exercises])
@@ -178,10 +203,12 @@ export function LiftsPage() {
 
   function openNewLift() {
     if (!selectedExercise) {
+      pendingRecordAfterCreate.current = true
       openNewExercise()
       return
     }
     setEditingLift(null)
+    setLiftExerciseId(selectedExercise.id)
     setFormError('')
     setLiftModalOpen(true)
   }
@@ -201,6 +228,7 @@ export function LiftsPage() {
       if (!editingExercise && pendingRecordAfterCreate.current) {
         pendingRecordAfterCreate.current = false
         setEditingLift(null)
+        setLiftExerciseId(saved.id)
         setLiftModalOpen(true)
       }
     } catch (caught) {
@@ -211,18 +239,21 @@ export function LiftsPage() {
   }
 
   async function saveLift(input: { weight: number; reps: number; recordedAt: string; note?: string | null }) {
-    if (!selectedExercise) return
+    const targetExerciseId = editingLift ? selectedExercise?.id : liftExercise?.id
+    if (!targetExerciseId) return
     setSaving(true)
     setFormError('')
     try {
       if (editingLift) {
-        await api.exercises.lifts.update(selectedExercise.id, editingLift.id, input)
+        await api.exercises.lifts.update(targetExerciseId, editingLift.id, input)
       } else {
-        await api.exercises.lifts.create(selectedExercise.id, input)
+        await api.exercises.lifts.create(targetExerciseId, input)
       }
       setLiftModalOpen(false)
       toast(editingLift ? 'Lift record updated.' : 'Max lift logged.')
-      await Promise.all([loadLifts(selectedExercise.id), loadExercises(selectedExercise.id)])
+      await loadExercises(targetExerciseId)
+      if (selectedId === targetExerciseId) await loadLifts(targetExerciseId)
+      else setSelectedId(targetExerciseId)
     } catch (caught) {
       setFormError(errorMessage(caught))
     } finally {
@@ -627,10 +658,15 @@ export function LiftsPage() {
       <LiftModal
         open={liftModalOpen}
         item={editingLift}
-        exercise={selectedExercise}
+        exercise={editingLift ? selectedExercise : liftExercise}
+        exercises={exercises}
         error={formError}
         busy={saving}
-        onClose={() => setLiftModalOpen(false)}
+        onClose={() => {
+          setLiftModalOpen(false)
+          setLiftExerciseId(null)
+        }}
+        onExerciseChange={setLiftExerciseId}
         onSave={saveLift}
       />
       <ConfirmDialog
@@ -721,23 +757,28 @@ function LiftModal({
   open,
   item,
   exercise,
+  exercises,
   error,
   busy,
   onClose,
+  onExerciseChange,
   onSave,
 }: {
   open: boolean
   item: Lift | null
   exercise: Exercise | null
+  exercises: Exercise[]
   error: string
   busy: boolean
   onClose: () => void
+  onExerciseChange: (exerciseId: number) => void
   onSave: (input: { weight: number; reps: number; recordedAt: string; note?: string | null }) => Promise<void>
 }) {
   const [weight, setWeight] = useState('')
   const [reps, setReps] = useState('1')
   const [recordedAt, setRecordedAt] = useState(todayInput())
   const [note, setNote] = useState('')
+  const [detailsOpen, setDetailsOpen] = useState(false)
 
   useEffect(() => {
     if (!open) return
@@ -745,6 +786,7 @@ function LiftModal({
     setReps(item ? String(item.reps) : '1')
     setRecordedAt(item ? dateInput(item.recordedAt) : todayInput())
     setNote(item?.note ?? '')
+    setDetailsOpen(Boolean(item))
   }, [item, open])
 
   function submit(event: FormEvent) {
@@ -764,13 +806,43 @@ function LiftModal({
     >
       <form id="lift-form" className="form-stack" onSubmit={submit}>
         {error && <div className="form-alert" role="alert">{error}</div>}
+        {!item && (
+          <label className="field">
+            <span>Exercise</span>
+            <select
+              value={exercise?.id ?? ''}
+              onChange={(event) => {
+                setWeight('')
+                onExerciseChange(Number(event.target.value))
+              }}
+              required
+            >
+              {groupExercises(exercises).map((group) => (
+                <optgroup label={group.label} key={group.key}>
+                  {group.exercises.map((candidate) => (
+                    <option value={candidate.id} key={candidate.id}>{candidate.name} ({candidate.unit})</option>
+                  ))}
+                </optgroup>
+              ))}
+            </select>
+          </label>
+        )}
         <div className="form-grid">
-          <label className="field"><span>Weight ({exercise?.unit})</span><input type="number" min="0.01" step="any" value={weight} onChange={(event) => setWeight(event.target.value)} placeholder="0.0" required data-modal-autofocus /></label>
-          <label className="field"><span>Reps</span><input type="number" min="1" max="1000" step="1" value={reps} onChange={(event) => setReps(event.target.value)} required /></label>
+          <label className="field"><span>Weight ({exercise?.unit})</span><input type="number" inputMode="decimal" min="0.01" step="any" value={weight} onChange={(event) => setWeight(event.target.value)} placeholder="0.0" required data-modal-autofocus /></label>
+          <label className="field"><span>Reps</span><input type="number" inputMode="numeric" min="1" max="1000" step="1" value={reps} onChange={(event) => setReps(event.target.value)} required /></label>
         </div>
         {estimate != null && Number.isFinite(estimate) && <div className="estimate-preview"><BarChart3 size={18} /><span>Estimated 1RM</span><strong>{estimate.toFixed(1)} {exercise?.unit}</strong></div>}
-        <label className="field"><span>Date</span><input type="date" value={recordedAt} max={todayInput()} onChange={(event) => setRecordedAt(event.target.value)} required /></label>
-        <label className="field"><span>Note <small>Optional</small></span><textarea value={note} onChange={(event) => setNote(event.target.value)} placeholder="RPE, form cues, equipment, or how the set felt..." maxLength={500} rows={4} /></label>
+        <details
+          className="form-disclosure"
+          open={detailsOpen}
+          onToggle={(event) => setDetailsOpen(event.currentTarget.open)}
+        >
+          <summary>Date or note <small>{recordedAt === todayInput() && !note.trim() ? 'Optional' : 'Added'}</small></summary>
+          <div className="form-disclosure__content">
+            <label className="field"><span>Date</span><input type="date" value={recordedAt} max={todayInput()} onChange={(event) => setRecordedAt(event.target.value)} required /></label>
+            <label className="field"><span>Note <small>Optional</small></span><textarea value={note} onChange={(event) => setNote(event.target.value)} placeholder="RPE, form cues, equipment, or how the set felt..." maxLength={500} rows={3} /></label>
+          </div>
+        </details>
       </form>
     </Modal>
   )

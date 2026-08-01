@@ -398,6 +398,34 @@
   background: var(--surface-soft);
 }
 
+.workout-exercise-card__actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 9px;
+}
+
+.workout-exercise-card__log {
+  display: inline-flex;
+  min-height: 40px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 9px 11px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--primary);
+  font-size: 11px;
+  font-weight: 760;
+  white-space: nowrap;
+}
+
+.workout-exercise-card__log:hover {
+  border-color: #b8c8bb;
+  background: var(--primary-soft);
+}
+
 .workout-exercise-card__prescription strong {
   font-size: 17px;
   letter-spacing: -0.03em;
@@ -1365,8 +1393,14 @@
     gap: 10px;
   }
 
-  .workout-exercise-card__prescription {
+  .workout-exercise-card__actions {
     grid-column: 2;
+    align-items: stretch;
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .workout-exercise-card__prescription {
     justify-self: start;
   }
 

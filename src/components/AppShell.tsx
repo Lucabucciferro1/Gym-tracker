@@ -12,6 +12,7 @@ import {
   LayoutDashboard,
   LogOut,
   Pencil,
+  Plus,
   Ruler,
   ShieldCheck,
   UsersRound,
@@ -31,6 +32,7 @@ import {
   normalizeMobileNavigation,
   type MobileNavigationOutletContext,
 } from '../mobileNavigation'
+import { planDayOfWeek } from '../navigationState'
 import type { MobileNavigationDestination } from '../types'
 import { downloadBlob } from '../utils'
 import { Brand, Button, Modal } from './ui'
@@ -148,6 +150,7 @@ export function AppShell() {
 
   useEffect(() => {
     setAccountOpen(false)
+    window.scrollTo({ top: 0, left: 0, behavior: 'auto' })
   }, [location.pathname])
 
   useEffect(() => {
@@ -220,6 +223,30 @@ export function AppShell() {
     (item) => navigationPathMatches(location.pathname, item.to),
   )
   const MoreIcon = MOBILE_NAVIGATION_MORE.icon
+  const today = planDayOfWeek()
+  const mobileQuickAction = ({
+    '/measurements': {
+      to: '/measurements?new=record',
+      label: 'Log a measurement',
+      icon: Ruler,
+    },
+    '/lifts': {
+      to: '/lifts?new=record',
+      label: 'Log a max lift',
+      icon: Dumbbell,
+    },
+    '/workout': {
+      to: `/workout?day=${today}&edit=day`,
+      label: "Edit today's workout",
+      icon: CalendarRange,
+    },
+    '/meals': {
+      to: `/meals?day=${today}&new=meal`,
+      label: "Add a meal to today",
+      icon: Utensils,
+    },
+  } as const)[location.pathname]
+  const MobileQuickActionIcon = mobileQuickAction?.icon
   const mobileNavigationContext: MobileNavigationOutletContext = {
     mobileNavigationItems,
     mobileNavigationLoading,
@@ -304,7 +331,19 @@ export function AppShell() {
 
       <div className="app-main">
         <header className="mobile-header">
-          <Brand compact />
+          {mobileQuickAction && MobileQuickActionIcon ? (
+            <Link
+              className="mobile-header__quick-action"
+              to={mobileQuickAction.to}
+              aria-label={mobileQuickAction.label}
+              title={mobileQuickAction.label}
+            >
+              <Plus size={15} />
+              <MobileQuickActionIcon size={19} />
+            </Link>
+          ) : (
+            <Brand compact />
+          )}
           <span>{pageLabels[location.pathname] ?? 'Forge'}</span>
           <button
             type="button"

@@ -59,6 +59,9 @@ export function MorePage() {
 
   const selectedSet = new Set(draftItems)
   const availableToAdd = eligibleDestinations.filter((destination) => !selectedSet.has(destination.key))
+  const unpinnedDestinations = eligibleDestinations.filter(
+    (destination) => !mobileNavigationItems.includes(destination.key),
+  )
   const draftIsComplete = draftItems.length === 4
   const draftChanged = !sameOrder(draftItems, mobileNavigationItems)
 
@@ -137,9 +140,26 @@ export function MorePage() {
     <div className="page-stack more-page">
       <PageHeader
         eyebrow="MORE"
-        title="Customize your Forge"
-        description="Choose your mobile shortcuts, or open any feature from one place."
+        title="More"
+        description="Open anything that is not on your bottom bar, or customize your shortcuts."
       />
+
+      <section aria-labelledby="unpinned-features-title">
+        <div className="more-section-heading">
+          <span className="eyebrow">QUICK ACCESS</span>
+          <h2 id="unpinned-features-title">Not on your bottom bar</h2>
+          <p>These pages stay one tap away even when they are not pinned.</p>
+        </div>
+        <div className="more-grid" aria-label="Unpinned Forge features">
+          {unpinnedDestinations.map(({ key, to, label, description, icon: Icon, tone }) => (
+            <Link className={`more-card more-card--${tone}`} to={to} key={key}>
+              <span className="more-card__icon"><Icon size={22} /></span>
+              <span><strong>{label}</strong><small>{description}</small></span>
+              <ChevronRight size={18} aria-hidden="true" />
+            </Link>
+          ))}
+        </div>
+      </section>
 
       <section className="panel mobile-nav-settings" aria-labelledby="mobile-nav-settings-title">
         <div className="mobile-nav-settings__header">
@@ -306,22 +326,6 @@ export function MorePage() {
         <p className="sr-only" role="status" aria-live="polite">{announcement}</p>
       </section>
 
-      <section aria-labelledby="all-features-title">
-        <div className="more-section-heading">
-          <span className="eyebrow">ALL FEATURES</span>
-          <h2 id="all-features-title">Everything in Forge</h2>
-          <p>Pinned and unpinned pages are always available here.</p>
-        </div>
-        <div className="more-grid" aria-label="All Forge features">
-          {eligibleDestinations.map(({ key, to, label, description, icon: Icon, tone }) => (
-            <Link className={`more-card more-card--${tone}`} to={to} key={key}>
-              <span className="more-card__icon"><Icon size={22} /></span>
-              <span><strong>{label}</strong><small>{description}</small></span>
-              <ChevronRight size={18} aria-hidden="true" />
-            </Link>
-          ))}
-        </div>
-      </section>
     </div>
   )
 }
