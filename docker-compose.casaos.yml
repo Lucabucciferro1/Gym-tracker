@@ -1,0 +1,51 @@
+name: forge-gym-tracker
+
+services:
+  forge:
+    image: ghcr.io/lucabucciferro1/gym-tracker:latest
+    pull_policy: always
+    container_name: forge-gym-tracker
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    environment:
+      NODE_ENV: production
+      PORT: "3001"
+      # Replace both values in the CasaOS install form before starting the app.
+      TURSO_DATABASE_URL: "libsql://replace-with-your-database.turso.io"
+      TURSO_AUTH_TOKEN: "replace-with-your-turso-token"
+      SESSION_DAYS: "30"
+      # Use 0 for direct HTTP/LAN access. Change to 1 when Forge is behind HTTPS.
+      COOKIE_SECURE: "0"
+      # Change to 1 when using one trusted reverse proxy or tunnel.
+      TRUST_PROXY: "0"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3001/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+x-casaos:
+  architectures:
+    - amd64
+    - arm64
+  main: forge
+  author: Forge
+  category: Utilities
+  description:
+    en_us: Private gym tracker backed by Turso.
+  developer: Forge
+  icon: https://raw.githubusercontent.com/walkxcode/dashboard-icons/main/png/dumbbells.png
+  index: /
+  port_map: "3001"
+  scheme: http
+  store_app_id: forge-gym-tracker
+  tagline:
+    en_us: Track training, measurements, workouts, and meals.
+  title:
+    en_us: Forge Gym Tracker
